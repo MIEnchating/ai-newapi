@@ -1,0 +1,109 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UpstreamType {
+  NEWAPI
+  SUB2API
+}
+
+enum AuthMode {
+  API_KEY
+  PASSWORD
+  USER_TOKEN
+  SESSION
+  ADMIN_TOKEN
+}
+
+enum UpstreamStatus {
+  OK
+  LIMITED
+  CHALLENGE_REQUIRED
+  EXPIRED
+  ERROR
+  DISABLED
+}
+
+enum RateDirection {
+  UP
+  DOWN
+  NEW
+  REMOVED
+  STABLE
+}
+
+model Upstream {
+  id               String            @id @default(cuid())
+  name             String
+  type             UpstreamType
+  baseUrl          String
+  authMode         AuthMode
+  status           UpstreamStatus    @default(LIMITED)
+  balance          Decimal?          @db.Decimal(18, 6)
+  balanceCurrency  String?
+  concurrency      Int?
+  credential       Credential?
+  lastSyncAt       DateTime?
+  lastError        String?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  rateSnapshots    RateSnapshot[]
+  rateChangeEvents RateChangeEvent[]
+
+  @@index([type])
+  @@index([status])
+}
+
+model Credential {
+  id               String   @id @default(cuid())
+  upstreamId       String   @unique
+  encryptedPayload String
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  upstream         Upstream @relation(fields: [upstreamId], references: [id], onDelete: Cascade)
+}
+
+model RateSnapshot {
+  id              String   @id @default(cuid())
+  upstreamId      String
+  provider        String
+  model           String
+  groupName       String?
+  channelName     String?
+  inputPrice      Decimal? @db.Decimal(18, 8)
+  outputPrice     Decimal? @db.Decimal(18, 8)
+  modelRatio      Decimal? @db.Decimal(18, 8)
+  completionRatio Decimal? @db.Decimal(18, 8)
+  currency        String?
+  source          String
+  rawHash         String?
+  capturedAt      DateTime
+  createdAt       DateTime @default(now())
+  upstream        Upstream @relation(fields: [upstreamId], references: [id], onDelete: Cascade)
+
+  @@index([upstreamId, provider, model, groupName, capturedAt])
+  @@index([capturedAt])
+}
+
+model RateChangeEvent {
+  id            String        @id @default(cuid())
+  upstreamId    String
+  provider      String
+  model         String
+  groupName     String?
+  field         String
+  direction     RateDirection
+  oldValue      Decimal?      @db.Decimal(18, 8)
+  newValue      Decimal?      @db.Decimal(18, 8)
+  changePercent Decimal?      @db.Decimal(18, 6)
+  createdAt     DateTime      @default(now())
+  upstream      Upstream      @relation(fields: [upstreamId], references: [id], onDelete: Cascade)
+
+  @@index([upstreamId, createdAt])
+  @@index([direction])
+}

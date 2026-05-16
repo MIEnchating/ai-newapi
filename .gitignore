@@ -1,0 +1,13 @@
+node_modules
+.next
+dist
+coverage
+.turbo
+.env
+.env.local
+*.log
+*.tsbuildinfo
+.codex-upstream-*
+apps/web/output/
+apps/web/layout-*.png
+apps/api/prisma/migrations/*/migration_lock.toml

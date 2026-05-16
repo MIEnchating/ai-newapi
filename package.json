@@ -1,0 +1,17 @@
+{
+  "name": "ai-newapi",
+  "private": true,
+  "packageManager": "pnpm@9.15.4",
+  "scripts": {
+    "dev": "pnpm -r --parallel --filter @ai-relay/shared --filter @ai-relay/api --filter @ai-relay/worker --filter @ai-relay/web dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm --filter @ai-relay/shared build && pnpm -r typecheck",
+    "lint": "pnpm -r lint",
+    "db:generate": "pnpm --filter @ai-relay/api prisma generate",
+    "db:migrate": "pnpm --filter @ai-relay/api prisma migrate dev",
+    "db:studio": "pnpm --filter @ai-relay/api prisma studio"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}
