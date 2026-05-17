@@ -5,6 +5,7 @@ coverage
 .turbo
 .env
 .env.local
+.relaydesk/
 *.log
 *.tsbuildinfo
 .codex-upstream-*

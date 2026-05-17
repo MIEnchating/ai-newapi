@@ -4,6 +4,7 @@ import { requestJson, unwrapData } from './http';
 type AdapterConfig = {
   baseUrl: string;
   authMode: string;
+  upstreamUserId?: string | null;
   credential: Record<string, string>;
 };
 
@@ -25,13 +26,26 @@ export class NewApiAdapter implements UpstreamAdapter {
       };
     }
 
-    const payload = await requestJson<unknown>(this.config.baseUrl, '/api/user/self', { token }).catch(() => null);
-    const user = payload ? unwrapData<Record<string, unknown>>(payload) : {};
+    const headers = new Headers();
+    const userId = this.config.upstreamUserId ?? this.config.credential.userId;
+    if (userId) {
+      headers.set('New-Api-User', userId);
+    }
+
+    const [statusPayload, selfPayload] = await Promise.all([
+      requestJson<unknown>(this.config.baseUrl, '/api/status').catch(() => null),
+      requestJson<unknown>(this.config.baseUrl, '/api/user/self', { token, headers }).catch(() => null)
+    ]);
+    const status = statusPayload ? unwrapData<Record<string, unknown>>(statusPayload) : {};
+    const quotaPerUnit = numeric(status.quota_per_unit) ?? 500000;
+    const user = selfPayload ? unwrapData<Record<string, unknown>>(selfPayload) : {};
+    const quota = numeric(user.quota);
+    const balance = numeric(user.balance);
 
     return {
       status: 'ok',
-      balance: numeric(user.quota) ?? numeric(user.balance),
-      balanceCurrency: 'quota'
+      balance: quota !== undefined ? quota / quotaPerUnit : balance,
+      balanceCurrency: 'CNY'
     };
   }
 
@@ -61,12 +75,33 @@ export class NewApiAdapter implements UpstreamAdapter {
     }
 
     const capturedAt = new Date().toISOString();
-    const payload = await requestJson<unknown>(this.config.baseUrl, '/api/option/', { token }).catch(() => null);
+    const headers = new Headers();
+    const userId = this.config.upstreamUserId ?? this.config.credential.userId;
+    if (userId) {
+      headers.set('New-Api-User', userId);
+    }
+
+    const payload = await requestJson<unknown>(this.config.baseUrl, '/api/option/', { token, headers }).catch(() => null);
     const options = payload ? unwrapData<Record<string, unknown>>(payload) : {};
+    const pricingPayload = await requestJson<unknown>(this.config.baseUrl, '/api/pricing', { token, headers }).catch(() => null);
+    const pricing = pricingPayload ? unwrapData<Record<string, unknown>>(pricingPayload) : {};
     const modelRatio = parseJsonRecord(options.ModelRatio ?? options.model_ratio);
     const completionRatio = parseJsonRecord(options.CompletionRatio ?? options.completion_ratio);
+    const groupRatio = {
+      ...parseJsonRecord(options.GroupRatio ?? options.group_ratio),
+      ...parseJsonRecord(pricing.group_ratio ?? pricing.GroupRatio)
+    };
 
-    return Object.keys(modelRatio).map((model) => ({
+    const groupRates = Object.keys(groupRatio).map((group) => ({
+      provider: 'newapi',
+      model: '*',
+      group,
+      modelRatio: numeric(groupRatio[group]),
+      source: pricingPayload ? '/api/pricing' : '/api/option/',
+      capturedAt
+    }));
+
+    const modelRates = Object.keys(modelRatio).map((model) => ({
       provider: 'newapi',
       model,
       modelRatio: numeric(modelRatio[model]),
@@ -74,6 +109,8 @@ export class NewApiAdapter implements UpstreamAdapter {
       source: '/api/option/',
       capturedAt
     }));
+
+    return [...groupRates, ...modelRates];
   }
 }
 

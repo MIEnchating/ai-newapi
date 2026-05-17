@@ -35,11 +35,11 @@ export async function refreshChannelMonitoring(channel: ChannelRecord, context: 
   }
 
   if (!context.credential || !channel.credentialConfigured) {
-    return limited(channel, '待配置凭据', '未配置上游 Key / Token，无法读取余额和分组倍率');
+    return limited(channel, '待配置认证信息', '未配置对应认证信息，无法读取余额、倍率和分组');
   }
 
   if (channel.auth === 'API Key' && channel.upstreamType !== 'newapi') {
-    return limited(channel, '受限监控', '普通 API Key 不能可靠读取账号余额和分组倍率');
+    return limited(channel, '受限监控', '普通 API Key 不能可靠读取账号余额、倍率和分组');
   }
 
   try {
@@ -72,14 +72,14 @@ export async function refreshChannelMonitoring(channel: ChannelRecord, context: 
       event:
         rateChanged && currentRate !== null && previousRate !== null
           ? {
-              title: `${channel.name} 分组倍率变化`,
-              detail: `${channel.upstreamName} / ${channel.group} / ${previousRate.toFixed(4)}x -> ${currentRate.toFixed(4)}x`,
+              title: `${channel.name} 倍率变化`,
+              detail: `${channel.upstreamName} / ${previousRate.toFixed(4)}x -> ${currentRate.toFixed(4)}x`,
               time: currentTime(),
               status: currentRate > previousRate ? 'error' : 'success'
             }
           : {
               title: `${channel.name} 同步完成`,
-              detail: `${channel.upstreamName} / ${snapshot.source} / ${snapshot.groupLabel ?? channel.group}`,
+              detail: `${channel.upstreamName} / ${snapshot.source}`,
               time: currentTime(),
               status: snapshot.limited ? 'warning' : 'success'
             }
@@ -176,7 +176,7 @@ async function readNewApiSnapshot(channel: ChannelRecord, credential: string) {
       ? '/api/user/self/groups'
       : groupRatioFromPricing !== null && groupRatioFromPricing !== undefined
         ? '/api/pricing'
-        : groupStatus ?? '未找到分组倍率';
+        : groupStatus ?? '未找到倍率';
 
   return {
     balance: balanceVisible ? formatAmount(quota / quotaPerUnit) : '不可见',
@@ -184,7 +184,7 @@ async function readNewApiSnapshot(channel: ChannelRecord, credential: string) {
     groupRatio,
     groupLabel: effectiveGroup,
     source: balanceError ? balanceError : source,
-    status: groupRatio === null ? (groupStatus ? '倍率读取失败' : '未找到分组倍率') : balanceVisible ? '正常' : balanceError ? '余额读取失败' : '余额不可见',
+    status: groupRatio === null ? (groupStatus ? '倍率读取失败' : '未找到倍率') : balanceVisible ? '正常' : balanceError ? '余额读取失败' : '余额不可见',
     limited: groupRatio === null || !balanceVisible
   };
 }
@@ -206,7 +206,7 @@ async function readSub2ApiSnapshot(channel: ChannelRecord, credential: string) {
   const rates = unwrapData(ratesPayload);
   const matchedKey = findSub2ApiKey(keys, channel);
   const matchedGroup = findSub2ApiGroup(groups, matchedKey, channel.group);
-  const groupRatioInfo = parseSub2ApiGroupRatio(matchedGroup, rates);
+  const groupRatioInfo = parseSub2ApiGroupRatio(matchedGroup, rates, channel.group);
   const groupRatio = groupRatioInfo.value;
   const modelCount = modelCountFromSub2ApiChannels(arrayOfRecords(unwrapData(channelsPayload)));
   const balance = numeric(self?.balance);
@@ -216,9 +216,9 @@ async function readSub2ApiSnapshot(channel: ChannelRecord, credential: string) {
     balance: balanceVisible ? formatAmount(balance) : '不可见',
     models: modelCount,
     groupRatio,
-    groupLabel: matchedGroup ? stringValue(matchedGroup.name) ?? channel.group : channel.group,
+    groupLabel: groupRatioInfo.groupName ?? (matchedGroup ? stringValue(matchedGroup.name) ?? channel.group : channel.group),
     source: matchedKey ? `/api/v1/keys + ${groupRatioInfo.source}` : groupRatioInfo.source,
-    status: groupRatio === null ? '未找到分组倍率' : balanceVisible ? '正常' : '余额不可见',
+    status: groupRatio === null ? '未找到倍率' : balanceVisible ? '正常' : '余额不可见',
     limited: groupRatio === null || !balanceVisible
   };
 }
@@ -303,27 +303,100 @@ function parseGroupRatio(groupRatio: JsonRecord | undefined, group: string) {
   return numeric(groupRatio?.[group]) ?? null;
 }
 
-function parseSub2ApiGroupRatio(group: JsonRecord | undefined, rates: unknown) {
+function parseSub2ApiGroupRatio(group: JsonRecord | undefined, rates: unknown, preferredGroupName: string) {
+  const preferred = preferredGroupName.trim().toLowerCase() || 'default';
   if (!group) {
-    return { value: null, source: '未找到分组' };
+    const fallback = fallbackSub2ApiRate(rates, preferred);
+    return fallback ?? { value: null, source: '未找到倍率', groupName: null };
   }
 
   const id = stringValue(group.id);
+  const name = stringValue(group.name);
   const defaultRate = numeric(group.rate_multiplier ?? group.rateMultiplier);
   const rateMap = recordValue(rates);
   const rateRows = arrayOfRecords(rates);
-  const userRate = id ? numeric(rateMap?.[id]) : undefined;
-  const rowRate = id
+  const userRate =
+    (id ? ratioFromValue(rateMap?.[id]) : undefined) ??
+    (name ? ratioFromNamedMap(rateMap, name) : undefined);
+  const rowRate = id || name
     ? rateRows
-        .map((row) => (stringValue(row.group_id ?? row.groupId ?? row.id) === id ? numeric(row.rate_multiplier ?? row.rateMultiplier) : undefined))
+        .map((row) => (matchesSub2ApiGroup(row, id, name) ? ratioFromValue(row) : undefined))
         .find((value) => value !== undefined)
     : undefined;
 
   if (userRate !== undefined || rowRate !== undefined) {
-    return { value: userRate ?? rowRate ?? null, source: '/api/v1/groups/rates' };
+    return { value: userRate ?? rowRate ?? null, source: '/api/v1/groups/rates', groupName: name ?? id ?? null };
   }
 
-  return { value: defaultRate ?? null, source: defaultRate === undefined ? '未找到分组倍率' : '/api/v1/groups/available' };
+  return { value: defaultRate ?? null, source: defaultRate === undefined ? '未找到倍率' : '/api/v1/groups/available', groupName: name ?? id ?? null };
+}
+
+function fallbackSub2ApiRate(rates: unknown, preferredGroupName: string) {
+  const rateMap = recordValue(rates);
+  const exactMapValue = ratioFromNamedMap(rateMap, preferredGroupName);
+  if (exactMapValue !== undefined) {
+    return { value: exactMapValue, source: '/api/v1/groups/rates', groupName: preferredGroupName };
+  }
+
+  const entries = rateMap
+    ? Object.entries(rateMap)
+        .map(([name, value]) => ({ name, value: ratioFromValue(value) }))
+        .filter((entry): entry is { name: string; value: number } => entry.value !== undefined)
+    : [];
+  const rows = arrayOfRecords(rates)
+    .map((row) => {
+      const name = stringValue(row.name) ?? stringValue(row.group) ?? stringValue(row.group_name) ?? stringValue(row.groupName) ?? stringValue(row.id);
+      const value = ratioFromValue(row);
+      return name && value !== undefined ? { name, value } : null;
+    })
+    .filter((entry): entry is { name: string; value: number } => Boolean(entry));
+  const candidates = entries.length > 0 ? entries : rows;
+
+  return preferredGroupName === 'default' && candidates.length === 1
+    ? { value: candidates[0].value, source: '/api/v1/groups/rates', groupName: candidates[0].name }
+    : null;
+}
+
+function ratioFromNamedMap(map: JsonRecord | undefined, name: string) {
+  if (!map) {
+    return undefined;
+  }
+
+  const key = Object.keys(map).find((item) => item.trim().toLowerCase() === name.trim().toLowerCase());
+  return key ? ratioFromValue(map[key]) : undefined;
+}
+
+function matchesSub2ApiGroup(row: JsonRecord, id?: string, name?: string) {
+  const rowValues = [
+    stringValue(row.group_id ?? row.groupId),
+    stringValue(row.id),
+    stringValue(row.name),
+    stringValue(row.group),
+    stringValue(row.group_name),
+    stringValue(row.groupName)
+  ].filter((value): value is string => Boolean(value));
+  const targets = [id, name].filter((value): value is string => Boolean(value)).map((value) => value.toLowerCase());
+
+  return rowValues.some((value) => targets.includes(value.toLowerCase()));
+}
+
+function ratioFromValue(value: unknown) {
+  const direct = numeric(value);
+  if (direct !== undefined) {
+    return direct;
+  }
+
+  const record = recordValue(value);
+  return record
+    ? numeric(record.ratio) ??
+        numeric(record.rate) ??
+        numeric(record.model_ratio) ??
+        numeric(record.modelRatio) ??
+        numeric(record.group_ratio) ??
+        numeric(record.groupRatio) ??
+        numeric(record.rate_multiplier) ??
+        numeric(record.rateMultiplier)
+    : undefined;
 }
 
 function findSub2ApiKey(keys: JsonRecord[], channel: ChannelRecord) {
@@ -346,7 +419,8 @@ function findSub2ApiGroup(groups: JsonRecord[], key: JsonRecord | undefined, gro
 
   return (
     groups.find((group) => keyGroupId && stringValue(group.id) === keyGroupId) ??
-    groups.find((group) => stringValue(group.name)?.toLowerCase() === normalizedName || stringValue(group.id) === groupName)
+    groups.find((group) => stringValue(group.name)?.toLowerCase() === normalizedName || stringValue(group.id) === groupName) ??
+    (normalizedName === 'default' && groups.length === 1 ? groups[0] : undefined)
   );
 }
 
@@ -451,9 +525,5 @@ function formatAmount(value: number) {
     return '不可见';
   }
 
-  if (Number.isInteger(value)) {
-    return String(value);
-  }
-
-  return value.toFixed(4).replace(/0+$/, '').replace(/\.$/, '');
+  return value.toFixed(2);
 }

@@ -30,6 +30,7 @@ export interface UpstreamAccountState {
 export interface RateInfo {
   provider: string;
   model: string;
+  groupId?: string;
   group?: string;
   channelName?: string;
   inputPrice?: number;

@@ -1,11 +1,33 @@
 import { NextResponse } from 'next/server';
-import { currentTime, getStore, type EventRecord, type RelayRecord, type StatusTone } from '../store';
+import { currentTime, getStore, mergePersistentChannels, type EventRecord } from '../store';
+import { getBackendRelay, listBackendChannels, updateBackendRelay } from '../backend-upstreams';
+import { requireAuth } from '../auth/session';
 
-export async function GET() {
-  return NextResponse.json({ relays: getStore().relays });
+export async function GET(request: Request) {
+  const session = await requireAuth(request);
+  if (!session.ok) {
+    return session.response;
+  }
+
+  const store = getStore();
+
+  try {
+    const persistent = await listBackendChannels();
+    const channelCount = mergePersistentChannels(store, persistent).length;
+    store.relays = [await getBackendRelay(channelCount)];
+  } catch {
+    // API 未启动时保留内存态，避免首页整体不可用。
+  }
+
+  return NextResponse.json({ relays: store.relays });
 }
 
 export async function PATCH(request: Request) {
+  const session = await requireAuth(request);
+  if (!session.ok) {
+    return session.response;
+  }
+
   const body = (await request.json()) as {
     id?: string;
     name?: string;
@@ -15,70 +37,44 @@ export async function PATCH(request: Request) {
     adminToken?: string;
   };
   const store = getStore();
-  const relayId = body.id ?? store.relays[0]?.id;
+  const persistent = await listBackendChannels().catch(() => []);
+  const channelCount = mergePersistentChannels(store, persistent).length;
 
-  if (!relayId) {
-    return NextResponse.json({ error: 'relay id is required' }, { status: 400 });
-  }
+  try {
+    const updatedRelay = await updateBackendRelay(
+      {
+        name: body.name,
+        baseUrl: body.baseUrl,
+        auth: body.auth,
+        adminUserId: body.adminUserId,
+        adminToken: body.adminToken
+      },
+      channelCount
+    );
+    delete store.relaySecrets[updatedRelay.id];
+    store.relays = [updatedRelay];
 
-  const existingRelay = store.relays.find((relay) => relay.id === relayId);
-  if (!existingRelay) {
-    return NextResponse.json({ error: 'relay not found' }, { status: 404 });
-  }
-
-  const name = body.name?.trim();
-  const baseUrl = body.baseUrl?.trim();
-  const auth = body.auth?.trim();
-  const adminUserId = body.adminUserId?.trim();
-  const adminToken = body.adminToken?.trim();
-
-  if (!name || !baseUrl || !auth || !adminUserId) {
-    return NextResponse.json({ error: 'name, baseUrl, auth and adminUserId are required' }, { status: 400 });
-  }
-
-  if (!adminToken && !existingRelay.tokenConfigured) {
-    return NextResponse.json({ error: 'admin token is required' }, { status: 400 });
-  }
-
-  let updatedRelay: RelayRecord | undefined;
-  if (adminToken) {
-    store.relaySecrets[relayId] = { adminToken };
-  }
-  const tokenConfigured = Boolean(adminToken || existingRelay.tokenConfigured);
-  const configured = baseUrl !== '待配置' && tokenConfigured && Boolean(adminUserId);
-  const statusTone: StatusTone = configured ? 'ok' : 'limited';
-
-  store.relays = store.relays.map((relay) => {
-    if (relay.id !== relayId) {
-      return relay;
-    }
-
-    updatedRelay = {
-      ...relay,
-      name,
-      baseUrl,
-      auth,
-      adminUserId,
-      tokenConfigured,
-      status: configured ? '已配置' : '待配置',
-      statusTone,
-      sync: configured ? '等待同步' : '尚未同步'
+    const event: EventRecord = {
+      title: `配置主站 ${updatedRelay.name}`,
+      detail: `${updatedRelay.baseUrl} / 用户 ${updatedRelay.adminUserId} / ${updatedRelay.auth} ${updatedRelay.tokenConfigured ? '已配置' : '未配置'}`,
+      time: currentTime(),
+      status: 'success'
     };
+    store.events = [event, ...store.events].slice(0, 20);
 
-    return updatedRelay as RelayRecord;
-  });
-
-  if (!updatedRelay) {
-    return NextResponse.json({ error: 'relay not found' }, { status: 404 });
+    return NextResponse.json({ relay: updatedRelay, relays: store.relays, events: store.events });
+  } catch (error) {
+    return NextResponse.json({ error: errorMessage(error) }, { status: 400 });
   }
+}
 
-  const event: EventRecord = {
-    title: `配置中转站 ${updatedRelay.name}`,
-    detail: `${updatedRelay.baseUrl} / 用户 ${updatedRelay.adminUserId} / ${updatedRelay.auth} ${updatedRelay.tokenConfigured ? '已配置' : '未配置'}`,
-    time: currentTime(),
-    status: 'success'
-  };
-  store.events = [event, ...store.events].slice(0, 20);
+function errorMessage(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
 
-  return NextResponse.json({ relay: updatedRelay, relays: store.relays, events: store.events });
+  try {
+    const parsed = JSON.parse(message) as { message?: unknown };
+    return typeof parsed.message === 'string' ? parsed.message : message;
+  } catch {
+    return message;
+  }
 }

@@ -3,19 +3,33 @@ import {
   currentTime,
   getStore,
   isUpstreamProvider,
+  mergePersistentChannels,
   providerLabel,
-  syncRelayCounts,
-  type ChannelRecord,
   type EventRecord,
-  type StatusTone,
   type UpstreamProvider
 } from '../store';
+import { createBackendChannel, listBackendChannels } from '../backend-upstreams';
+import { requireAuth } from '../auth/session';
 
-export async function GET() {
-  return NextResponse.json({ upstreams: getStore().channels });
+export async function GET(request: Request) {
+  const auth = await requireAuth(request);
+  if (!auth.ok) {
+    return auth.response;
+  }
+
+  const store = getStore();
+  const channels = await listBackendChannels();
+  mergePersistentChannels(store, channels);
+
+  return NextResponse.json({ upstreams: store.channels });
 }
 
 export async function POST(request: Request) {
+  const auth = await requireAuth(request);
+  if (!auth.ok) {
+    return auth.response;
+  }
+
   const body = (await request.json()) as {
     name?: string;
     baseUrl?: string;
@@ -35,110 +49,44 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'only newapi, sub2api and cli_proxy are supported' }, { status: 400 });
   }
 
-  const store = getStore();
-  const relayId = store.relays[0]?.id;
-  if (!relayId) {
-    return NextResponse.json({ error: 'relay is required before creating channel upstream' }, { status: 400 });
+  if (body.type === 'cli_proxy') {
+    return NextResponse.json({ error: 'CPA 号池是本地临时配置，不能持久化为上游' }, { status: 400 });
   }
 
-  const credential = body.credential?.trim();
-  const credentialConfigured = Boolean(credential);
-  const monitoring = monitoringState(body.type, body.auth, credentialConfigured);
-  const rechargeRatio = normalizeRechargeRatio(body.rechargeRatio);
-  const upstream: ChannelRecord = {
-    id: `channel-${body.type}-${Date.now()}`,
-    relayId,
-    source: 'manual',
-    name: body.name,
-    group: 'default',
-    upstreamType: body.type,
-    upstreamName: body.name,
-    upstreamBaseUrl: body.baseUrl,
-    upstreamUserId: '',
-    keyName: '',
-    auth: body.auth,
-    credentialConfigured,
-    status: monitoring.status,
-    statusTone: monitoring.statusTone,
-    balance: monitoring.balance,
-    models: 0,
-    groupRatio: monitoring.groupRatio,
-    rateSource: monitoring.rateSource,
-    rechargeRatio,
-    currentRate: monitoring.currentRate,
-    previousRate: monitoring.previousRate,
-    cf: monitoring.cf,
-    priority: normalizeInteger(body.priority, 50),
-    weight: normalizeInteger(body.weight, 0),
-    sync: body.type === 'cli_proxy' ? '不适用' : '尚未同步'
-  };
-
-  if (credential) {
-    store.channelSecrets[upstream.id] = { credential };
-  }
-  store.channels = [upstream, ...store.channels];
-  const event: EventRecord = {
-    title: `新增渠道上游 ${body.name}`,
-    detail: `${providerLabel(body.type)} / ${body.auth} / 充值 1:${formatRatio(rechargeRatio)}`,
-    time: currentTime(),
-    status: 'success'
-  };
-
-  store.events = [event, ...store.events].slice(0, 20);
-  syncRelayCounts(store);
-
-  return NextResponse.json({ upstream });
-}
-
-function normalizeRechargeRatio(value: unknown) {
-  const parsed = typeof value === 'number' ? value : Number(value);
-  return Number.isFinite(parsed) && parsed >= 1 ? Math.trunc(parsed) : 1;
-}
-
-function normalizeInteger(value: unknown, fallback: number) {
-  const parsed = typeof value === 'number' ? value : Number(value);
-  return Number.isFinite(parsed) ? Math.trunc(parsed) : fallback;
-}
-
-function formatRatio(value: number) {
-  return String(Math.max(1, Math.trunc(value)));
-}
-
-function monitoringState(type: UpstreamProvider, auth: string, credentialConfigured: boolean) {
-  if (type === 'cli_proxy') {
-    return {
-      status: '仅转发',
-      statusTone: 'limited' as StatusTone,
-      balance: '-',
-      currentRate: null,
-      previousRate: null,
-      cf: '不适用',
-      groupRatio: null,
-      rateSource: '不适用'
+  try {
+    const upstream = await createBackendChannel({
+      name: body.name,
+      group: 'default',
+      upstreamType: body.type,
+      upstreamName: body.name,
+      upstreamBaseUrl: body.baseUrl,
+      auth: body.auth,
+      credential: body.credential,
+      rechargeRatio: body.rechargeRatio,
+      priority: body.priority,
+      weight: body.weight
+    });
+    const store = getStore();
+    const event: EventRecord = {
+      title: `新增渠道上游 ${body.name}`,
+      detail: `${providerLabel(body.type)} / ${body.auth} / 充值 1:${formatRatio(body.rechargeRatio)}`,
+      time: currentTime(),
+      status: 'success'
     };
-  }
+    store.events = [event, ...store.events].slice(0, 20);
+    mergePersistentChannels(store, await listBackendChannels());
 
-  if (!credentialConfigured) {
-    return {
-      status: '待配置凭据',
-      statusTone: 'limited' as StatusTone,
-      balance: '不可见',
-      currentRate: null,
-      previousRate: null,
-      cf: '待检测',
-      groupRatio: null,
-      rateSource: '待配置凭据'
-    };
+    return NextResponse.json({ upstream });
+  } catch (error) {
+    return NextResponse.json({ error: errorMessage(error) }, { status: 502 });
   }
+}
 
-  return {
-    status: auth === 'API Key' ? '受限监控' : '待同步',
-    statusTone: (auth === 'API Key' ? 'limited' : 'warn') as StatusTone,
-    balance: auth === 'API Key' ? '不可见' : '待同步',
-    currentRate: null,
-    previousRate: null,
-    cf: '待检测',
-    groupRatio: null,
-    rateSource: auth === 'API Key' ? 'API Key 受限' : '待同步'
-  };
+function formatRatio(value: number | undefined) {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return (Number.isFinite(parsed) && parsed >= 0.01 ? parsed : 1).toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
 }

@@ -1,5 +1,6 @@
 export function normalizeBaseUrl(baseUrl: string) {
-  return baseUrl.replace(/\/+$/, '');
+  const trimmed = baseUrl.trim().replace(/\/+$/, '');
+  return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
 }
 
 export async function requestJson<T>(

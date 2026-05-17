@@ -1,7 +1,8 @@
 import { chromium } from 'playwright-core';
 
 const chromePath = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
-const views = ['overview', 'relays', 'channels', 'rates', 'credentials', 'alerts'];
+const baseUrl = 'http://localhost:3000';
+const views = ['overview', 'channels', 'rates', 'credentials', 'alerts'];
 
 const browser = await chromium.launch({
   executablePath: chromePath,
@@ -9,7 +10,8 @@ const browser = await chromium.launch({
 });
 
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 });
-await page.goto('http://localhost:3000', { waitUntil: 'networkidle' });
+await ensureLoggedIn(page);
+await page.goto(baseUrl, { waitUntil: 'networkidle' });
 
 const results = [];
 
@@ -51,10 +53,27 @@ await browser.close();
 function viewLabel(view) {
   return {
     overview: '总览',
-    relays: '中转站',
     channels: '渠道管理',
     rates: '倍率快照',
-    credentials: '凭据',
+    credentials: '渠道凭证',
     alerts: '告警'
   }[view];
+}
+
+async function ensureLoggedIn(page) {
+  const username = process.env.E2E_LOGIN_USER ?? 'admin';
+  const password = process.env.E2E_LOGIN_PASSWORD;
+  if (!password) {
+    throw new Error('E2E_LOGIN_PASSWORD is required for authenticated checks');
+  }
+  const statusResponse = await page.request.get(`${baseUrl}/api/auth/status`);
+  const status = await statusResponse.json();
+  const endpoint = status.setupRequired ? 'setup' : 'login';
+  const response = await page.request.post(`${baseUrl}/api/auth/${endpoint}`, {
+    data: { username, password }
+  });
+
+  if (!response.ok()) {
+    throw new Error(`login failed: ${response.status()} ${await response.text()}`);
+  }
 }

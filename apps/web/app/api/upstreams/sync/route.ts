@@ -1,8 +1,14 @@
 import { NextResponse } from 'next/server';
-import { getStore, normalizeChannel, type ChannelRecord, type EventRecord } from '../../store';
+import { dedupeChannels, getStore, normalizeChannel, type ChannelRecord, type EventRecord } from '../../store';
 import { refreshChannelMonitoring } from '../../upstream-monitor';
+import { requireAuth } from '../../auth/session';
 
-export async function POST() {
+export async function POST(request: Request) {
+  const auth = await requireAuth(request);
+  if (!auth.ok) {
+    return auth.response;
+  }
+
   const store = getStore();
   const generatedEvents: EventRecord[] = [];
   const refreshedChannels: ChannelRecord[] = [];
@@ -16,7 +22,7 @@ export async function POST() {
     }
   }
 
-  store.channels = refreshedChannels;
+  store.channels = dedupeChannels(refreshedChannels, store.channelSecrets);
 
   store.events = [...generatedEvents, ...store.events].slice(0, 20);
 

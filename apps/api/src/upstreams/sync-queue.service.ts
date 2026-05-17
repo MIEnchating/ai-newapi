@@ -7,6 +7,7 @@ export class SyncQueueService implements OnModuleDestroy {
   private readonly connection = new IORedis({
     host: process.env.REDIS_HOST ?? 'localhost',
     port: Number(process.env.REDIS_PORT ?? 6379),
+    password: process.env.REDIS_PASSWORD || undefined,
     maxRetriesPerRequest: null
   });
 
