@@ -1,5 +1,5 @@
 import type { RateInfo, UpstreamAccountState, UpstreamAdapter } from '@ai-relay/shared';
-import { requestJson, unwrapData } from './http';
+import { requestJson, requestJsonResponse, unwrapData } from './http';
 
 type AdapterConfig = {
   baseUrl: string;
@@ -8,7 +8,11 @@ type AdapterConfig = {
   credential: Record<string, string>;
 };
 
+type NewApiAuthContext = RequestInit & { token?: string };
+
 export class NewApiAdapter implements UpstreamAdapter {
+  private authContextPromise?: Promise<NewApiAuthContext | null>;
+
   constructor(private readonly config: AdapterConfig) {}
 
   async testConnection() {
@@ -17,24 +21,18 @@ export class NewApiAdapter implements UpstreamAdapter {
   }
 
   async getAccountState(): Promise<UpstreamAccountState> {
-    const token = this.config.credential.token ?? this.config.credential.adminToken;
+    const auth = await this.getAuthContext();
 
-    if (!token) {
+    if (!auth) {
       return {
         status: 'limited',
-        lastError: 'NewAPI 未配置管理 token，只能做调用探测'
+        lastError: 'NewAPI 未配置 Token 或账号密码，只能做调用探测'
       };
-    }
-
-    const headers = new Headers();
-    const userId = this.config.upstreamUserId ?? this.config.credential.userId;
-    if (userId) {
-      headers.set('New-Api-User', userId);
     }
 
     const [statusPayload, selfPayload] = await Promise.all([
       requestJson<unknown>(this.config.baseUrl, '/api/status').catch(() => null),
-      requestJson<unknown>(this.config.baseUrl, '/api/user/self', { token, headers }).catch(() => null)
+      requestJson<unknown>(this.config.baseUrl, '/api/user/self', auth).catch(() => null)
     ]);
     const status = statusPayload ? unwrapData<Record<string, unknown>>(statusPayload) : {};
     const quotaPerUnit = numeric(status.quota_per_unit) ?? 500000;
@@ -50,8 +48,8 @@ export class NewApiAdapter implements UpstreamAdapter {
   }
 
   async listModels(): Promise<string[]> {
-    const token = this.config.credential.token ?? this.config.credential.adminToken;
-    const payload = await requestJson<unknown>(this.config.baseUrl, '/v1/models', { token });
+    const auth = await this.getAuthContext();
+    const payload = await requestJson<unknown>(this.config.baseUrl, '/v1/models', auth ?? {});
     const data = unwrapData<unknown>(payload);
     const models = Array.isArray(data) ? data : recordArray(recordValue(data)?.data);
 
@@ -68,22 +66,21 @@ export class NewApiAdapter implements UpstreamAdapter {
   }
 
   async listRates(): Promise<RateInfo[]> {
-    const token = this.config.credential.token ?? this.config.credential.adminToken;
+    if (this.config.authMode === 'api_key') {
+      return [];
+    }
 
-    if (!token || this.config.authMode === 'api_key') {
+    const auth = await this.getAuthContext();
+
+    if (!auth) {
       return [];
     }
 
     const capturedAt = new Date().toISOString();
-    const headers = new Headers();
-    const userId = this.config.upstreamUserId ?? this.config.credential.userId;
-    if (userId) {
-      headers.set('New-Api-User', userId);
-    }
 
-    const payload = await requestJson<unknown>(this.config.baseUrl, '/api/option/', { token, headers }).catch(() => null);
+    const payload = await requestJson<unknown>(this.config.baseUrl, '/api/option/', auth).catch(() => null);
     const options = payload ? unwrapData<Record<string, unknown>>(payload) : {};
-    const pricingPayload = await requestJson<unknown>(this.config.baseUrl, '/api/pricing', { token, headers }).catch(() => null);
+    const pricingPayload = await requestJson<unknown>(this.config.baseUrl, '/api/pricing', auth).catch(() => null);
     const pricing = pricingPayload ? unwrapData<Record<string, unknown>>(pricingPayload) : {};
     const modelRatio = parseJsonRecord(options.ModelRatio ?? options.model_ratio);
     const completionRatio = parseJsonRecord(options.CompletionRatio ?? options.completion_ratio);
@@ -112,6 +109,79 @@ export class NewApiAdapter implements UpstreamAdapter {
 
     return [...groupRates, ...modelRates];
   }
+
+  private async getAuthContext(): Promise<NewApiAuthContext | null> {
+    this.authContextPromise ??= this.loadAuthContext();
+    return this.authContextPromise;
+  }
+
+  private async loadAuthContext(): Promise<NewApiAuthContext | null> {
+    if (this.config.authMode === 'password') {
+      return this.passwordAuthContext();
+    }
+
+    const token = this.config.credential.token ?? this.config.credential.adminToken ?? this.config.credential.bearerToken;
+    if (!token) {
+      return null;
+    }
+
+    const headers = new Headers();
+    const userId = this.config.upstreamUserId ?? this.config.credential.userId;
+    if (userId) {
+      headers.set('New-Api-User', userId);
+    }
+
+    return { token, headers };
+  }
+
+  private async passwordAuthContext(): Promise<NewApiAuthContext> {
+    const account = this.config.credential.email ?? this.config.credential.username;
+    const password = this.config.credential.password;
+
+    if (!account || !password) {
+      throw new Error('NewAPI 用户登录需要 email/username 和 password');
+    }
+
+    const login = await requestJsonResponse<unknown>(this.config.baseUrl, '/api/user/login', {
+      method: 'POST',
+      body: JSON.stringify({ username: account, password })
+    });
+    const data = recordValue(unwrapData<unknown>(login.payload)) ?? {};
+
+    if (data.require_2fa === true) {
+      throw new Error('NewAPI 账号启用了 2FA，暂不能使用账号密码自动鉴权');
+    }
+
+    const cookie = cookieHeader(login.headers);
+    if (!cookie) {
+      throw new Error('NewAPI 登录成功但没有返回 session cookie');
+    }
+
+    const userId = this.config.upstreamUserId ?? this.config.credential.userId ?? stringValue(data.id);
+    if (!userId) {
+      throw new Error('NewAPI 用户登录需要 upstreamUserId');
+    }
+
+    const headers = new Headers({ cookie });
+    headers.set('New-Api-User', userId);
+
+    return { headers };
+  }
+}
+
+function cookieHeader(headers: Headers) {
+  const getSetCookie = (headers as Headers & { getSetCookie?: () => string[] }).getSetCookie;
+  const setCookieValues = typeof getSetCookie === 'function'
+    ? getSetCookie.call(headers)
+    : [];
+  const fallback = headers.get('set-cookie');
+  const rawValues = setCookieValues.length > 0 ? setCookieValues : fallback ? [fallback] : [];
+  const cookies = rawValues
+    .flatMap((value) => value.split(/,(?=\s*[^;,]+=)/))
+    .map((value) => value.split(';')[0]?.trim())
+    .filter((value): value is string => Boolean(value));
+
+  return cookies.join('; ');
 }
 
 function parseJsonRecord(value: unknown): Record<string, unknown> {
@@ -155,5 +225,9 @@ function numeric(value: unknown): number | undefined {
 }
 
 function stringValue(value: unknown): string | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(value);
+  }
+
   return typeof value === 'string' && value.trim() ? value : undefined;
 }

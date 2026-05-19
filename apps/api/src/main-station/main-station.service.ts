@@ -53,49 +53,59 @@ export class MainStationService {
   }
 
   async update(input: MainStationInput) {
-    await this.ensureSchema();
-    const existing = await this.prisma.mainStation.findUnique({
-      where: { id: MAIN_STATION_ID }
-    });
-    const name = trimOrDefault(input.name, '主站');
-    const baseUrl = trimOrNull(input.baseUrl);
-    const auth = trimOrDefault(input.auth, '管理 Token');
-    const adminUserId = trimOrNull(input.adminUserId);
-    const adminToken = trimOrNull(input.adminToken);
+    try {
+      return await retryTransientDatabase(async () => {
+        await this.ensureSchema();
+        const existing = await this.prisma.mainStation.findUnique({
+          where: { id: MAIN_STATION_ID }
+        });
+        const name = trimOrDefault(input.name, '主站');
+        const baseUrl = trimOrNull(input.baseUrl);
+        const auth = trimOrDefault(input.auth, '管理 Token');
+        const adminUserId = trimOrNull(input.adminUserId);
+        const adminToken = trimOrNull(input.adminToken);
 
-    if (!name || !baseUrl || !auth || !adminUserId) {
-      throw new BadRequestException('name, baseUrl, auth and adminUserId are required');
-    }
+        if (!name || !baseUrl || !auth || !adminUserId) {
+          throw new BadRequestException('name, baseUrl, auth and adminUserId are required');
+        }
 
-    const encryptedAdminToken = adminToken
-      ? encryptCredentialPayload({ adminToken })
-      : existing?.encryptedAdminToken ?? null;
+        const encryptedAdminToken = adminToken
+          ? encryptCredentialPayload({ adminToken })
+          : existing?.encryptedAdminToken ?? null;
 
-    if (!encryptedAdminToken) {
-      throw new BadRequestException('admin token is required');
-    }
+        if (!encryptedAdminToken) {
+          throw new BadRequestException('admin token is required');
+        }
 
-    const station = await this.prisma.mainStation.upsert({
-      where: { id: MAIN_STATION_ID },
-      create: {
-        id: MAIN_STATION_ID,
-        name,
-        baseUrl,
-        auth,
-        adminUserId,
-        encryptedAdminToken
-      },
-      update: {
-        name,
-        baseUrl,
-        auth,
-        adminUserId,
-        encryptedAdminToken,
-        lastError: null
+        const station = await this.prisma.mainStation.upsert({
+          where: { id: MAIN_STATION_ID },
+          create: {
+            id: MAIN_STATION_ID,
+            name,
+            baseUrl,
+            auth,
+            adminUserId,
+            encryptedAdminToken
+          },
+          update: {
+            name,
+            baseUrl,
+            auth,
+            adminUserId,
+            encryptedAdminToken,
+            lastError: null
+          }
+        });
+
+        return toPublicStation(station);
+      });
+    } catch (error) {
+      if (isTransientDatabaseError(error)) {
+        throw new BadRequestException('数据库连接临时断开，请重试保存主站配置');
       }
-    });
 
-    return toPublicStation(station);
+      throw error;
+    }
   }
 
   async syncChannels() {
@@ -120,74 +130,89 @@ export class MainStationService {
     }
 
     const syncedAt = new Date();
-    const updatedStation = await this.prisma.$transaction(async (tx) => {
-      for (const channel of imported.channels) {
-        const existing = await tx.upstream.findUnique({
-          where: { id: channel.id },
-          select: {
-            status: true,
-            name: true,
-            upstreamName: true,
-            keyName: true,
-            groupName: true,
-            mainStationGroupName: true,
-            credential: { select: { id: true } }
-          }
-        });
-        const status =
-          channel.status === UpstreamStatus.DISABLED
-            ? UpstreamStatus.DISABLED
-            : existing?.status === UpstreamStatus.DISABLED || !existing
-              ? UpstreamStatus.LIMITED
-              : existing.status;
-
-        const existingNameParts = existing ? splitChannelName(existing.name) : null;
-        const shouldRefreshPlatformGroup =
-          !existing?.upstreamName ||
-          existing.upstreamName.trim() === existing.name.trim() ||
-          existing.upstreamName.trim() === existingNameParts?.platformGroupName;
-        const shouldResetUnverifiedRateGroup =
-          existing &&
-          !existing.credential &&
-          existing.groupName !== 'default' &&
-          (!existing.mainStationGroupName || existing.groupName === existing.mainStationGroupName);
-
-        await tx.upstream.upsert({
-          where: { id: channel.id },
-          create: {
-            id: channel.id,
-            name: channel.name,
-            type: channel.type,
-            baseUrl: channel.baseUrl,
-            authMode: defaultAuthMode(channel.type),
-            groupName: channel.groupName,
-            mainStationGroupName: channel.mainStationGroupName,
-            upstreamName: channel.platformGroupName,
-            status,
-            rechargeRatio: 1,
-            priority: channel.priority,
-            weight: channel.weight
-          },
-          update: {
-            name: channel.name,
-            baseUrl: channel.baseUrl,
-            status,
-            priority: channel.priority,
-            weight: channel.weight,
-            mainStationGroupName: channel.mainStationGroupName,
-            ...(shouldResetUnverifiedRateGroup ? { groupName: 'default' } : {}),
-            ...(shouldRefreshPlatformGroup ? { upstreamName: channel.platformGroupName } : {})
-          }
-        });
-      }
-
-      return tx.mainStation.update({
-        where: { id: MAIN_STATION_ID },
-        data: {
-          lastSyncAt: syncedAt,
-          lastError: null
+    const updatedStation = await retryTransientDatabase(async () => {
+      const existingUpstreams = await this.prisma.upstream.findMany({
+        where: { id: { in: imported.channels.map((channel) => channel.id) } },
+        select: {
+          id: true,
+          status: true,
+          name: true,
+          upstreamName: true,
+          keyName: true,
+          groupName: true,
+          mainStationGroupName: true,
+          credential: { select: { id: true } }
         }
       });
+      const existingById = new Map(existingUpstreams.map((upstream) => [upstream.id, upstream]));
+
+      return this.prisma.$transaction(async (tx) => {
+        for (const channel of imported.channels) {
+          const existing = existingById.get(channel.id);
+          const status =
+            channel.status === UpstreamStatus.DISABLED
+              ? UpstreamStatus.DISABLED
+              : existing?.status === UpstreamStatus.DISABLED || !existing
+                ? UpstreamStatus.LIMITED
+                : existing.status;
+
+          const existingNameParts = existing ? splitChannelName(existing.name) : null;
+          const shouldRefreshPlatformGroup =
+            !existing?.upstreamName ||
+            existing.upstreamName.trim() === existing.name.trim() ||
+            existing.upstreamName.trim() === existingNameParts?.platformGroupName;
+          const shouldResetUnverifiedRateGroup =
+            existing &&
+            !existing.credential &&
+            existing.groupName !== 'default' &&
+            (!existing.mainStationGroupName || existing.groupName === existing.mainStationGroupName);
+
+          await tx.upstream.upsert({
+            where: { id: channel.id },
+            create: {
+              id: channel.id,
+              name: channel.name,
+              type: channel.type,
+              baseUrl: channel.baseUrl,
+              authMode: defaultAuthMode(channel.type),
+              groupName: channel.groupName,
+              mainStationGroupName: channel.mainStationGroupName,
+              upstreamName: channel.platformGroupName,
+              status,
+              rechargeRatio: 1,
+              priority: channel.priority,
+              weight: channel.weight
+            },
+            update: {
+              name: channel.name,
+              baseUrl: channel.baseUrl,
+              status,
+              priority: channel.priority,
+              weight: channel.weight,
+              mainStationGroupName: channel.mainStationGroupName,
+              ...(shouldResetUnverifiedRateGroup ? { groupName: 'default' } : {}),
+              ...(shouldRefreshPlatformGroup ? { upstreamName: channel.platformGroupName } : {})
+            }
+          });
+        }
+
+        return tx.mainStation.update({
+          where: { id: MAIN_STATION_ID },
+          data: {
+            lastSyncAt: syncedAt,
+            lastError: null
+          }
+        });
+      }, { timeout: 30_000, maxWait: 10_000 });
+    }).catch(async (error) => {
+      const message = isTransientDatabaseError(error)
+        ? '数据库写入主站渠道超时，请稍后重试同步'
+        : errorMessage(error);
+      await this.prisma.mainStation.update({
+        where: { id: MAIN_STATION_ID },
+        data: { lastError: message }
+      }).catch(() => undefined);
+      throw new BadRequestException(message);
     });
 
     return {
@@ -650,7 +675,7 @@ function inferUpstreamType(name: string, baseUrl: string) {
 }
 
 function defaultAuthMode(type: UpstreamType) {
-  return type === UpstreamType.SUB2API ? AuthMode.USER_TOKEN : AuthMode.USER_TOKEN;
+  return type === UpstreamType.SUB2API ? AuthMode.PASSWORD : AuthMode.PASSWORD;
 }
 
 function extractChannelRecords(payload: unknown): Array<Record<string, unknown>> {
@@ -728,6 +753,34 @@ function trimOrDefault(value: string | undefined, fallback: string) {
 function trimOrNull(value: string | undefined) {
   const trimmed = value?.trim();
   return trimmed || null;
+}
+
+async function retryTransientDatabase<T>(operation: () => Promise<T>, retries = 2) {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (!isTransientDatabaseError(error) || attempt === retries) {
+        throw error;
+      }
+      await wait(150 * (attempt + 1));
+    }
+  }
+
+  throw lastError;
+}
+
+function isTransientDatabaseError(error: unknown) {
+  const message = errorMessage(error);
+
+  return /Server has closed the connection|Transaction already closed|P1017|P2028/i.test(message);
+}
+
+function wait(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function isChallenge(text: string) {

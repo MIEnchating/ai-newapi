@@ -199,7 +199,7 @@ function defaultAuth(type: UpstreamProvider) {
     return '无鉴权';
   }
 
-  return '用户 Access Token';
+  return '用户登录';
 }
 
 function detectType(probes: ProbeResult[]): { type: DetectionType; reason: string } {

@@ -1149,18 +1149,17 @@ async function testNewApiCredential(
   upstreamUserId: string | null,
   groupName: string
 ): Promise<CredentialTestResult> {
-  const token = credential.adminToken ?? credential.token ?? credential.bearerToken;
-
-  if (!token) {
-    throw new Error('请输入 NewAPI 认证信息');
-  }
-
   const statusPayload = await requestJson<unknown>(baseUrl, '/api/status').catch(() => null);
   const status = recordValue(unwrapData(statusPayload)) ?? {};
   const quotaPerUnit = numeric(status.quota_per_unit) ?? 500000;
   const suggestedRechargeRatio = suggestRechargeRatio(quotaPerUnit);
 
   if (authMode === AuthMode.API_KEY) {
+    const token = credential.adminToken ?? credential.token ?? credential.bearerToken;
+    if (!token) {
+      throw new Error('请输入 NewAPI API Key');
+    }
+
     await requestJson<unknown>(baseUrl, '/v1/models', { token });
     return {
       ok: true,
@@ -1170,15 +1169,12 @@ async function testNewApiCredential(
     };
   }
 
-  const headers = new Headers();
-  if (upstreamUserId) {
-    headers.set('New-Api-User', upstreamUserId);
-  }
+  const auth = await newApiAuthContext(baseUrl, authMode, credential, upstreamUserId);
 
   const [selfResult, pricingResult, optionsResult] = await Promise.allSettled([
-    requestJson<unknown>(baseUrl, '/api/user/self', { token, headers }),
-    requestJson<unknown>(baseUrl, '/api/pricing', { token, headers }),
-    requestJson<unknown>(baseUrl, '/api/option/', { token, headers })
+    requestJson<unknown>(baseUrl, '/api/user/self', auth),
+    requestJson<unknown>(baseUrl, '/api/pricing', auth),
+    requestJson<unknown>(baseUrl, '/api/option/', auth)
   ]);
   const self = settledRecord(selfResult);
   const pricing = settledRecord(pricingResult);
@@ -1214,26 +1210,18 @@ async function listNewApiGroups(
   credential: Record<string, string>,
   upstreamUserId: string | null
 ): Promise<UpstreamGroupInfo[]> {
-  const token = credential.adminToken ?? credential.token ?? credential.bearerToken;
-
-  if (!token) {
-    throw new Error('请输入 NewAPI 认证信息');
-  }
   if (authMode === AuthMode.API_KEY) {
-    throw new Error('NewAPI API Key 不能读取上游分组，请使用用户 Access Token 或管理 Token');
+    throw new Error('NewAPI API Key 不能读取上游分组，请使用账号密码、用户 Access Token 或管理 Token');
   }
 
-  const headers = new Headers();
-  if (upstreamUserId) {
-    headers.set('New-Api-User', upstreamUserId);
-  }
+  const auth = await newApiAuthContext(baseUrl, authMode, credential, upstreamUserId);
 
   const [pricingResult, optionsResult, groupResult, groupsResult, userGroupsResult] = await Promise.allSettled([
-    requestJson<unknown>(baseUrl, '/api/pricing', { token, headers }),
-    requestJson<unknown>(baseUrl, '/api/option/', { token, headers }),
-    requestJson<unknown>(baseUrl, '/api/group/', { token, headers }),
-    requestJson<unknown>(baseUrl, '/api/groups', { token, headers }),
-    requestJson<unknown>(baseUrl, '/api/user/groups', { token, headers })
+    requestJson<unknown>(baseUrl, '/api/pricing', auth),
+    requestJson<unknown>(baseUrl, '/api/option/', auth),
+    requestJson<unknown>(baseUrl, '/api/group/', auth),
+    requestJson<unknown>(baseUrl, '/api/groups', auth),
+    requestJson<unknown>(baseUrl, '/api/user/groups', auth)
   ]);
   const pricing = settledRecord(pricingResult);
   const options = settledRecord(optionsResult);
@@ -1253,6 +1241,68 @@ async function listNewApiGroups(
   }
 
   return groups;
+}
+
+async function newApiAuthContext(
+  baseUrl: string,
+  authMode: AuthMode,
+  credential: Record<string, string>,
+  upstreamUserId: string | null
+): Promise<RequestInit & { token?: string }> {
+  if (authMode === AuthMode.PASSWORD) {
+    return newApiPasswordAuthContext(baseUrl, credential, upstreamUserId);
+  }
+
+  const token = credential.adminToken ?? credential.token ?? credential.bearerToken;
+  if (!token) {
+    throw new Error('请输入 NewAPI Token');
+  }
+
+  const headers = new Headers();
+  const userId = upstreamUserId ?? credential.userId;
+  if (userId) {
+    headers.set('New-Api-User', userId);
+  }
+
+  return { token, headers };
+}
+
+async function newApiPasswordAuthContext(
+  baseUrl: string,
+  credential: Record<string, string>,
+  upstreamUserId: string | null
+): Promise<RequestInit> {
+  const account = credential.email ?? credential.username;
+  const password = credential.password;
+
+  if (!account || !password) {
+    throw new Error('请输入 NewAPI 账号/邮箱和密码');
+  }
+
+  const login = await requestJsonResponse<unknown>(baseUrl, '/api/user/login', {
+    method: 'POST',
+    body: JSON.stringify({ username: account, password })
+  });
+  const data = recordValue(unwrapData(login.payload)) ?? {};
+
+  if (data.require_2fa === true) {
+    throw new Error('NewAPI 账号启用了 2FA，暂不能使用账号密码自动鉴权');
+  }
+
+  const cookie = cookieHeader(login.headers);
+  if (!cookie) {
+    throw new Error('NewAPI 登录成功但没有返回 session cookie');
+  }
+
+  const userId = upstreamUserId ?? credential.userId ?? stringValue(data.id);
+  if (!userId) {
+    throw new Error('请输入 NewAPI 上游用户 ID');
+  }
+
+  const headers = new Headers({ cookie });
+  headers.set('New-Api-User', userId);
+
+  return { headers };
 }
 
 async function testSub2ApiCredential(
@@ -1892,6 +1942,14 @@ async function requestJson<T>(
   path: string,
   options: RequestInit & { token?: string } = {}
 ): Promise<T> {
+  return (await requestJsonResponse<T>(baseUrl, path, options)).payload;
+}
+
+async function requestJsonResponse<T>(
+  baseUrl: string,
+  path: string,
+  options: RequestInit & { token?: string } = {}
+): Promise<{ payload: T; headers: Headers }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 12_000);
   const headers = new Headers(options.headers);
@@ -1930,7 +1988,7 @@ async function requestJson<T>(
       throw new Error(stringValue(record?.message) ?? stringValue(record?.reason) ?? `上游接口返回 code ${code}`);
     }
 
-    return payload as T;
+    return { payload: payload as T, headers: response.headers };
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
       throw new Error('请求超时');
@@ -1940,6 +1998,21 @@ async function requestJson<T>(
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function cookieHeader(headers: Headers) {
+  const getSetCookie = (headers as Headers & { getSetCookie?: () => string[] }).getSetCookie;
+  const setCookieValues = typeof getSetCookie === 'function'
+    ? getSetCookie.call(headers)
+    : [];
+  const fallback = headers.get('set-cookie');
+  const rawValues = setCookieValues.length > 0 ? setCookieValues : fallback ? [fallback] : [];
+  const cookies = rawValues
+    .flatMap((value) => value.split(/,(?=\s*[^;,]+=)/))
+    .map((value) => value.split(';')[0]?.trim())
+    .filter((value): value is string => Boolean(value));
+
+  return cookies.join('; ');
 }
 
 function unwrapData(value: unknown) {

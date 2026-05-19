@@ -21,6 +21,7 @@ import {
   ThunderboltOutlined
 } from '@ant-design/icons';
 import {
+  Alert,
   AutoComplete,
   Avatar,
   Badge,
@@ -75,6 +76,7 @@ type AuthStatus = {
   setupRequired: boolean;
   authenticated: boolean;
   username?: string;
+  error?: string;
 };
 
 type RelayView = {
@@ -651,7 +653,12 @@ export default function DashboardPage() {
     setAuthChecking(true);
     try {
       const response = await fetch('/api/auth/status', { cache: 'no-store' });
-      setAuthStatus((await response.json()) as AuthStatus);
+      const payload = (await response.json().catch(() => ({
+        setupRequired: false,
+        authenticated: false,
+        error: '认证服务响应异常'
+      }))) as AuthStatus;
+      setAuthStatus(payload);
     } finally {
       setAuthChecking(false);
     }
@@ -1437,7 +1444,7 @@ export default function DashboardPage() {
   function channelCredentialFieldErrors(values: Partial<ChannelForm>) {
     const upstreamType = values.upstreamType;
     const auth = values.auth;
-    const loginMode = upstreamType === 'sub2api' && auth === '用户登录';
+    const loginMode = (upstreamType === 'newapi' || upstreamType === 'sub2api') && auth === '用户登录';
     const hasToken = Boolean(values.credential?.trim());
     const hasAccountPassword = Boolean(values.credentialAccount?.trim() && values.credentialPassword?.trim());
     const canUseExistingCredential = Boolean(channelCredentialTarget(values));
@@ -1459,6 +1466,9 @@ export default function DashboardPage() {
     }
     if (!auth) {
       fieldErrors.push({ name: 'auth', errors: ['请选择认证方式'] });
+    }
+    if (auth && !authOptions(upstreamType).some((option) => option.value === auth)) {
+      fieldErrors.push({ name: 'auth', errors: ['当前上游不支持此认证方式'] });
     }
     if (upstreamType === 'newapi' && auth !== 'API Key' && !values.upstreamUserId?.trim()) {
       fieldErrors.push({ name: 'upstreamUserId', errors: ['请输入上游用户 ID'] });
@@ -1627,7 +1637,7 @@ export default function DashboardPage() {
     const primary = group.primary;
     const baseline = credentialGroupBaseline(group);
     const authChanged = values.auth !== baseline.auth;
-    const loginMode = primary.upstreamType === 'sub2api' && values.auth === '用户登录';
+    const loginMode = (primary.upstreamType === 'newapi' || primary.upstreamType === 'sub2api') && values.auth === '用户登录';
     const hasToken = Boolean(values.credential?.trim());
     const hasAccountPassword = Boolean(values.credentialAccount?.trim() && values.credentialPassword?.trim());
     const needsCredential =
@@ -1638,6 +1648,9 @@ export default function DashboardPage() {
 
     if (!values.auth) {
       fieldErrors.push({ name: 'auth', errors: ['请选择认证方式'] });
+    }
+    if (values.auth && !authOptions(primary.upstreamType).some((option) => option.value === values.auth)) {
+      fieldErrors.push({ name: 'auth', errors: ['当前上游不支持此认证方式'] });
     }
     if (primary.upstreamType === 'newapi' && values.auth !== 'API Key' && !values.upstreamUserId?.trim()) {
       fieldErrors.push({ name: 'upstreamUserId', errors: ['请输入上游用户 ID'] });
@@ -1839,7 +1852,7 @@ export default function DashboardPage() {
 
     if (!response.ok) {
       const responsePayload = (await response.json().catch(() => ({}))) as { error?: string };
-      if (responsePayload.error === 'Sub2API 用户登录需要账号/邮箱和密码') {
+      if (responsePayload.error?.includes('账号/邮箱和密码')) {
         credentialForm.setFields([
           { name: 'credentialAccount', errors: ['请输入账号或邮箱'] },
           { name: 'credentialPassword', errors: ['请输入密码'] }
@@ -1857,13 +1870,13 @@ export default function DashboardPage() {
     setUpstreamGroups([]);
     credentialForm.resetFields();
     setActiveView('credentials');
-    await loadDashboard();
     const rechargeRatio = normalizeSuggestedRechargeRatio(suggestedRechargeRatio);
     messageApi.success(
       rechargeRatio
         ? `平台分组 ${group.name} 的凭证已保存，充值倍率 1:${formatRatio(rechargeRatio)}`
         : `平台分组 ${group.name} 的凭证已保存`
     );
+    void loadDashboard().catch(() => undefined);
   }
 
   return (
@@ -2351,7 +2364,7 @@ export default function DashboardPage() {
                     type={type}
                     auth={getFieldValue('auth')}
                     prefix={prefix}
-                    suffix="渠道保存后到“平台凭证”配置认证方式、Token 或账号密码；同平台分组共用一套凭证。"
+                    suffix="渠道保存后到“平台凭证”配置 Token 或账号密码；同平台分组共用一套凭证。"
                   />
                 );
               }}
@@ -2376,14 +2389,14 @@ export default function DashboardPage() {
                     <Form.Item
                       name="upstreamUserId"
                       label="上游用户 ID"
-                      extra="NewAPI 用户 Access Token 或管理 Token 读取余额和倍率时需要。"
+                      extra="NewAPI 账号密码、用户 Access Token 或管理 Token 读取余额和倍率时需要。"
                       rules={[{ required: true, message: '请输入上游用户 ID' }]}
                     >
                       <Input placeholder="例如 1" />
                     </Form.Item>
                   ) : null}
                   <AuthHint type={type} auth={auth} />
-                  {type === 'sub2api' && auth === '用户登录' ? (
+                  {(type === 'newapi' || type === 'sub2api') && auth === '用户登录' ? (
                     <Row gutter={12}>
                       <Col xs={24} md={12}>
                         <Form.Item name="credentialAccount" label="账号 / 邮箱" extra="仅用于识别和保存平台凭证，不在页面回显。">
@@ -2613,7 +2626,7 @@ export default function DashboardPage() {
                     <Form.Item
                       name="upstreamUserId"
                       label="上游用户 ID"
-                      extra="NewAPI 用户 Access Token 或管理 Token 读取余额和倍率时需要。"
+                      extra="NewAPI 账号密码、用户 Access Token 或管理 Token 读取余额和倍率时需要。"
                       rules={[{ required: true, message: '请输入上游用户 ID' }]}
                     >
                       <Input placeholder="例如 1" />
@@ -2637,7 +2650,7 @@ export default function DashboardPage() {
                     ? '服务端 AES-GCM 加密保存；同平台分组共用，不在页面回显。'
                     : '留空表示不修改；填写后会同步到同平台分组的全部渠道。';
 
-                  if (type === 'sub2api' && auth === '用户登录') {
+                  if ((type === 'newapi' || type === 'sub2api') && auth === '用户登录') {
                     return (
                       <Row gutter={12}>
                         <Col xs={24} md={12}>
@@ -2798,6 +2811,7 @@ function AuthScreen({
             </Text>
           </div>
         </div>
+        {status?.error ? <Alert type="warning" showIcon title={status.error} /> : null}
         <Form
           form={form}
           layout="vertical"
@@ -4440,7 +4454,9 @@ function AuthHint({ type, auth, prefix, suffix }: { type?: ChannelFormUpstreamTy
   let text = '先输入上游地址识别类型；识别不出来时手动选择 NewAPI、Sub2API 或 CPA 号池。';
 
   if (type === 'newapi') {
-    text = '用户 Token 或管理 Token 可读取余额和倍率；普通 API Key 通常只能做受限监控。';
+    text = auth === '用户登录'
+      ? 'NewAPI 账号密码会调用登录接口；遇到 Cloudflare/验证码时可改用用户 Access Token 或管理 Token。'
+      : 'NewAPI 用户 Access Token 或管理 Token 可读取余额和倍率；API Key 通常只能做受限监控。';
   }
 
   if (type === 'sub2api') {
@@ -4449,7 +4465,7 @@ function AuthHint({ type, auth, prefix, suffix }: { type?: ChannelFormUpstreamTy
     } else if (auth === '用户 Token') {
       text = 'Sub2API 用户 Token 可读取余额、Key 用量和倍率。';
     } else {
-      text = 'Sub2API 只支持用户登录或用户 Token，默认使用用户登录。';
+      text = 'Sub2API 支持用户登录或用户 Token。';
     }
   }
 
@@ -5352,7 +5368,7 @@ function upstreamProviderLabel(type: UpstreamProvider) {
 function authOptions(type?: ChannelFormUpstreamType): Array<{ label: string; value: string }> {
   if (type === 'sub2api') {
     return [
-      { label: '用户登录（账号/邮箱 + 密码）', value: '用户登录' },
+      { label: '账号密码', value: '用户登录' },
       { label: '用户 Token', value: '用户 Token' }
     ];
   }
@@ -5367,6 +5383,7 @@ function authOptions(type?: ChannelFormUpstreamType): Array<{ label: string; val
 
   if (type === 'newapi') {
     return [
+      { label: '账号密码', value: '用户登录' },
       { label: '用户 Access Token', value: '用户 Access Token' },
       { label: '管理 Token', value: '管理 Token' },
       { label: 'API Key', value: 'API Key' }
@@ -5377,7 +5394,7 @@ function authOptions(type?: ChannelFormUpstreamType): Array<{ label: string; val
 }
 
 function defaultAuth(type: UpstreamProvider) {
-  if (type === 'sub2api') {
+  if (type === 'newapi' || type === 'sub2api') {
     return '用户登录';
   }
 
@@ -5385,7 +5402,7 @@ function defaultAuth(type: UpstreamProvider) {
     return '无鉴权';
   }
 
-  return '用户 Access Token';
+  return '用户登录';
 }
 
 function normalizeAuthForType(type?: UpstreamProvider, auth?: string) {
@@ -5427,6 +5444,10 @@ function credentialPlaceholder(type?: UpstreamProvider, auth?: string) {
 
   if (type === 'newapi' && auth === '管理 Token') {
     return 'sk-...';
+  }
+
+  if (type === 'newapi' && auth === '用户 Access Token') {
+    return '请输入用户 Access Token';
   }
 
   return '请输入认证信息';
@@ -5529,18 +5550,18 @@ function balanceHint(channel: ChannelView) {
     }
 
     return channel.upstreamType === 'newapi'
-      ? 'NewAPI 的 sk-模型调用 Key 通常不能读取账号余额；请改用用户 Access Token 并填写上游用户 ID。'
+      ? 'NewAPI 的 sk-模型调用 Key 通常不能读取账号余额；请改用账号密码或用户 Access Token，并填写上游用户 ID。'
       : 'API Key 只能转发调用，不能读取账号余额。';
   }
 
   if (channel.status === '余额读取失败') {
-    return channel.rateSource || '访问令牌或上游用户 ID 校验失败。';
+    return channel.rateSource || 'Token、账号密码或上游用户 ID 校验失败。';
   }
 
   if (channel.status === '余额不可见') {
     return channel.upstreamType === 'newapi'
-      ? '已读到倍率，但 /api/user/self 没返回余额。请确认填写的是 NewAPI 用户 Access Token 和上游用户 ID。'
-      : '已读到倍率，但 /api/v1/auth/me 没返回余额。请确认填写的是 Sub2API 用户 JWT。';
+      ? '已读到倍率，但 /api/user/self 没返回余额。请确认填写的是 NewAPI Token/账号密码和上游用户 ID。'
+      : '已读到倍率，但 /api/v1/auth/me 没返回余额。请确认填写的是 Sub2API 用户 Token 或账号密码。';
   }
 
   return channel.rateSource || channel.status;

@@ -8,6 +8,7 @@ export type AuthStatus = {
   setupRequired: boolean;
   authenticated: boolean;
   username?: string;
+  error?: string;
 };
 
 type AuthResponse = {
@@ -19,9 +20,17 @@ type AuthResponse = {
 };
 
 export async function authStatus(request: Request): Promise<AuthStatus> {
-  return backendAuthJson<AuthStatus>('/auth/status', {
-    token: readCookie(request, cookieName)
-  });
+  try {
+    return await backendAuthJson<AuthStatus>('/auth/status', {
+      token: readCookie(request, cookieName)
+    });
+  } catch (error) {
+    return {
+      setupRequired: false,
+      authenticated: false,
+      error: authErrorMessage(error)
+    };
+  }
 }
 
 export async function setupAuth(input: { username?: string; password?: string }) {
@@ -139,6 +148,16 @@ class BackendAuthError extends Error {
   ) {
     super(message);
   }
+}
+
+function authErrorMessage(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+
+  if (/fetch failed|ECONNREFUSED|connection refused|failed to fetch/i.test(message)) {
+    return `后端 API 未启动或无法连接：${API_BASE_URL}`;
+  }
+
+  return message || '认证服务不可用';
 }
 
 function readCookie(request: Request, name: string) {

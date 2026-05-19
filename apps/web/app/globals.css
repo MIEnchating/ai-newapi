@@ -927,6 +927,30 @@ select {
   flex: 0 0 auto;
 }
 
+.ant-modal .ant-modal-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.ant-modal .ant-modal-footer .ant-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 96px;
+  height: 40px;
+  margin-inline-start: 0 !important;
+  line-height: 1;
+  box-shadow: none;
+}
+
+.ant-modal .ant-modal-footer .ant-btn > .ant-btn-icon {
+  display: inline-flex;
+  align-items: center;
+}
+
 .channel-modal .ant-modal-body {
   flex: 1 1 auto;
   min-height: 0;

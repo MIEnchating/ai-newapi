@@ -36,6 +36,16 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Sub2API 只支持用户登录或用户 Token' }, { status: 400 });
   }
 
+  if (
+    body.upstreamType === 'newapi' &&
+    body.auth !== '用户登录' &&
+    body.auth !== '用户 Access Token' &&
+    body.auth !== '管理 Token' &&
+    body.auth !== 'API Key'
+  ) {
+    return NextResponse.json({ error: 'NewAPI 只支持账号密码、用户 Access Token、管理 Token 或 API Key' }, { status: 400 });
+  }
+
   try {
     const result = body.id ? await listBackendUpstreamGroups(body.id, body) : await listBackendDraftUpstreamGroups(body);
     return NextResponse.json(result);

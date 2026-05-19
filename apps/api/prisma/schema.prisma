@@ -97,7 +97,7 @@ model Upstream {
 model Credential {
   id               String   @id @default(cuid())
   upstreamId       String   @unique
-  encryptedPayload String   @db.Text
+  encryptedPayload String   @db.LongText
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
   upstream         Upstream @relation(fields: [upstreamId], references: [id], onDelete: Cascade)

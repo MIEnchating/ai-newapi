@@ -37,8 +37,7 @@ export async function PATCH(request: Request) {
     adminToken?: string;
   };
   const store = getStore();
-  const persistent = await listBackendChannels().catch(() => []);
-  const channelCount = mergePersistentChannels(store, persistent).length;
+  const channelCount = store.channels.length;
 
   try {
     const updatedRelay = await updateBackendRelay(

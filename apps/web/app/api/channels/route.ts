@@ -75,9 +75,8 @@ export async function POST(request: Request) {
   try {
     const channel = await createBackendChannel(body);
     appendEvent(store, channelEvent('新增渠道', channel));
-    const channels = await loadChannels();
 
-    return NextResponse.json({ channel, channels, events: store.events, relays: store.relays });
+    return NextResponse.json({ channel, events: store.events, relays: store.relays });
   } catch (error) {
     return NextResponse.json({ error: errorMessage(error) }, { status: 502 });
   }
@@ -146,9 +145,8 @@ export async function PATCH(request: Request) {
       });
       appendEvent(store, channelEvent('配置渠道', channel));
       store.channels = store.channels.filter((item) => item.id !== existing.id);
-      const channels = await loadChannels();
 
-      return NextResponse.json({ channel, channels, events: store.events, relays: store.relays });
+      return NextResponse.json({ channel, events: store.events, relays: store.relays });
     } catch (error) {
       return NextResponse.json({ error: errorMessage(error) }, { status: 502 });
     }
@@ -157,9 +155,8 @@ export async function PATCH(request: Request) {
   try {
     const channel = await updateBackendChannel(body.id, body);
     appendEvent(store, channelEvent('配置渠道', channel));
-    const channels = await loadChannels();
 
-    return NextResponse.json({ channel, channels, events: store.events, relays: store.relays });
+    return NextResponse.json({ channel, events: store.events, relays: store.relays });
   } catch (error) {
     return NextResponse.json({ error: errorMessage(error) }, { status: 502 });
   }
@@ -371,6 +368,16 @@ function validateChannelPayload(body: ChannelPayload, relayId?: string) {
 
   if (body.upstreamType === 'sub2api' && body.auth !== '用户登录' && body.auth !== '用户 Token') {
     return NextResponse.json({ error: 'Sub2API 只支持用户登录或用户 Token' }, { status: 400 });
+  }
+
+  if (
+    body.upstreamType === 'newapi' &&
+    body.auth !== '用户登录' &&
+    body.auth !== '用户 Access Token' &&
+    body.auth !== '管理 Token' &&
+    body.auth !== 'API Key'
+  ) {
+    return NextResponse.json({ error: 'NewAPI 只支持账号密码、用户 Access Token、管理 Token 或 API Key' }, { status: 400 });
   }
 
   return null;
