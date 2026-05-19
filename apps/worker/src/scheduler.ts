@@ -1,6 +1,6 @@
 import { Queue } from 'bullmq';
 import IORedis from 'ioredis';
-import { Prisma, UpstreamStatus } from '@prisma/client';
+import { Prisma, UpstreamStatus, UpstreamType } from '@prisma/client';
 import { prisma } from './prisma';
 
 const settingId = 'default';
@@ -12,6 +12,7 @@ export function startScheduler(connection: IORedis) {
 
   async function enqueueDueUpstreams() {
     const now = new Date();
+    await ensureInspectionSchema();
     const setting = await prisma.inspectionSetting.upsert({
       where: { id: settingId },
       create: {
@@ -62,6 +63,7 @@ export function startScheduler(connection: IORedis) {
 
     const upstreams = await prisma.upstream.findMany({
       where: {
+        type: { not: UpstreamType.CLI_PROXY },
         OR: dueBranches
       },
       select: { id: true }
@@ -99,7 +101,7 @@ export function startScheduler(connection: IORedis) {
           where: { id: settingId },
           data: {
             lastRunAt: new Date(),
-            lastError: error instanceof Error ? error.message : String(error)
+            lastError: errorMessage(error)
           }
         })
         .catch(() => undefined);
@@ -116,6 +118,27 @@ export function startScheduler(connection: IORedis) {
   };
 }
 
+async function ensureInspectionSchema() {
+  const statements = [
+    "ALTER TABLE Upstream MODIFY COLUMN type ENUM('NEWAPI','SUB2API','CLI_PROXY') NOT NULL",
+    'ALTER TABLE InspectionSetting MODIFY COLUMN lastResult TEXT NULL',
+    'ALTER TABLE InspectionSetting MODIFY COLUMN lastError TEXT NULL',
+    'ALTER TABLE InspectionSetting ADD COLUMN latencyAutoDisableEnabled BOOLEAN NOT NULL DEFAULT true',
+    'ALTER TABLE InspectionSetting ADD COLUMN priorityUpdateEnabled BOOLEAN NOT NULL DEFAULT true',
+    'ALTER TABLE InspectionSetting ADD COLUMN priorityStrategy VARCHAR(24) NOT NULL DEFAULT "RATE_FIRST"'
+  ];
+
+  for (const statement of statements) {
+    try {
+      await prisma.$executeRawUnsafe(statement);
+    } catch (error) {
+      if (!/Duplicate column|1060/i.test(errorMessage(error))) {
+        throw error;
+      }
+    }
+  }
+}
+
 function normalizeInterval(value: unknown) {
   const parsed = typeof value === 'number' ? value : Number(value);
   if (!Number.isFinite(parsed)) {
@@ -123,4 +146,8 @@ function normalizeInterval(value: unknown) {
   }
 
   return Math.min(24 * 60 * 60_000, Math.max(60_000, Math.trunc(parsed)));
+}
+
+function errorMessage(error: unknown) {
+  return (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 1000);
 }

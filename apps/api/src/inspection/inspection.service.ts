@@ -9,6 +9,7 @@ const maxIntervalMs = 24 * 60 * 60_000;
 const minLatencyThresholdMs = 100;
 const maxLatencyThresholdMs = 120_000;
 const ruleActions = new Set(['NONE', 'LOWER', 'DISABLE']);
+const priorityStrategies = new Set(['RATE_FIRST', 'BALANCED']);
 
 @Injectable()
 export class InspectionService {
@@ -58,6 +59,9 @@ export class InspectionService {
     latencyDisableThresholdMs?: number;
     latencyFailureLimit?: number;
     disabledRetestMs?: number;
+    latencyAutoDisableEnabled?: boolean;
+    priorityUpdateEnabled?: boolean;
+    priorityStrategy?: string;
     cpaPreferred?: boolean;
     inspectionConcurrency?: number;
     balanceLowAction?: string;
@@ -121,6 +125,27 @@ export class InspectionService {
       await this.prisma.$executeRaw`
         UPDATE InspectionSetting
         SET inspectionConcurrency = ${extraData.inspectionConcurrency}, lastError = NULL, updatedAt = CURRENT_TIMESTAMP(3)
+        WHERE id = ${settingId}
+      `;
+    }
+    if (extraData.latencyAutoDisableEnabled !== undefined) {
+      await this.prisma.$executeRaw`
+        UPDATE InspectionSetting
+        SET latencyAutoDisableEnabled = ${extraData.latencyAutoDisableEnabled}, lastError = NULL, updatedAt = CURRENT_TIMESTAMP(3)
+        WHERE id = ${settingId}
+      `;
+    }
+    if (extraData.priorityUpdateEnabled !== undefined) {
+      await this.prisma.$executeRaw`
+        UPDATE InspectionSetting
+        SET priorityUpdateEnabled = ${extraData.priorityUpdateEnabled}, lastError = NULL, updatedAt = CURRENT_TIMESTAMP(3)
+        WHERE id = ${settingId}
+      `;
+    }
+    if (extraData.priorityStrategy !== undefined) {
+      await this.prisma.$executeRaw`
+        UPDATE InspectionSetting
+        SET priorityStrategy = ${extraData.priorityStrategy}, lastError = NULL, updatedAt = CURRENT_TIMESTAMP(3)
         WHERE id = ${settingId}
       `;
     }
@@ -211,12 +236,16 @@ export class InspectionService {
     const rows = await this.prisma.$queryRaw<Array<{
       cpaPreferred: boolean | number | null;
       inspectionConcurrency: number | null;
+      latencyAutoDisableEnabled: boolean | number | null;
+      priorityUpdateEnabled: boolean | number | null;
+      priorityStrategy: string | null;
       balanceLowAction: string | null;
       rateIncreaseAction: string | null;
       ruleActionPriority: number | null;
       ruleActionWeight: number | null;
     }>>`
-      SELECT cpaPreferred, inspectionConcurrency, balanceLowAction, rateIncreaseAction, ruleActionPriority, ruleActionWeight
+      SELECT cpaPreferred, inspectionConcurrency, latencyAutoDisableEnabled, priorityUpdateEnabled, priorityStrategy,
+             balanceLowAction, rateIncreaseAction, ruleActionPriority, ruleActionWeight
       FROM InspectionSetting
       WHERE id = ${settingId}
       LIMIT 1
@@ -226,6 +255,9 @@ export class InspectionService {
     return {
       cpaPreferred: row?.cpaPreferred === true || row?.cpaPreferred === 1,
       inspectionConcurrency: normalizeConcurrency(row?.inspectionConcurrency),
+      latencyAutoDisableEnabled: normalizeBoolean(row?.latencyAutoDisableEnabled, true),
+      priorityUpdateEnabled: normalizeBoolean(row?.priorityUpdateEnabled, true),
+      priorityStrategy: normalizePriorityStrategy(row?.priorityStrategy),
       balanceLowAction: normalizeRuleAction(row?.balanceLowAction),
       rateIncreaseAction: normalizeRuleAction(row?.rateIncreaseAction),
       ruleActionPriority: normalizePriority(row?.ruleActionPriority),
@@ -240,10 +272,15 @@ export class InspectionService {
 
     await this.addColumnIfMissing('ALTER TABLE InspectionSetting ADD COLUMN cpaPreferred BOOLEAN NOT NULL DEFAULT false');
     await this.addColumnIfMissing('ALTER TABLE InspectionSetting ADD COLUMN inspectionConcurrency INT NOT NULL DEFAULT 3');
+    await this.addColumnIfMissing('ALTER TABLE InspectionSetting ADD COLUMN latencyAutoDisableEnabled BOOLEAN NOT NULL DEFAULT true');
+    await this.addColumnIfMissing('ALTER TABLE InspectionSetting ADD COLUMN priorityUpdateEnabled BOOLEAN NOT NULL DEFAULT true');
+    await this.addColumnIfMissing('ALTER TABLE InspectionSetting ADD COLUMN priorityStrategy VARCHAR(24) NOT NULL DEFAULT "RATE_FIRST"');
     await this.addColumnIfMissing('ALTER TABLE InspectionSetting ADD COLUMN balanceLowAction VARCHAR(16) NOT NULL DEFAULT "NONE"');
     await this.addColumnIfMissing('ALTER TABLE InspectionSetting ADD COLUMN rateIncreaseAction VARCHAR(16) NOT NULL DEFAULT "NONE"');
     await this.addColumnIfMissing('ALTER TABLE InspectionSetting ADD COLUMN ruleActionPriority INT NOT NULL DEFAULT 10');
     await this.addColumnIfMissing('ALTER TABLE InspectionSetting ADD COLUMN ruleActionWeight INT NOT NULL DEFAULT 0');
+    await this.addColumnIfMissing('ALTER TABLE InspectionSetting MODIFY COLUMN lastResult TEXT NULL');
+    await this.addColumnIfMissing('ALTER TABLE InspectionSetting MODIFY COLUMN lastError TEXT NULL');
 
     this.schemaChecked = true;
   }
@@ -340,6 +377,9 @@ function normalizeFailureLimit(value: unknown) {
 }
 
 function normalizeExtraUpdate(input: {
+  latencyAutoDisableEnabled?: boolean;
+  priorityUpdateEnabled?: boolean;
+  priorityStrategy?: string;
   inspectionConcurrency?: number;
   balanceLowAction?: string;
   rateIncreaseAction?: string;
@@ -347,6 +387,11 @@ function normalizeExtraUpdate(input: {
   ruleActionWeight?: number;
 }) {
   return {
+    latencyAutoDisableEnabled:
+      typeof input.latencyAutoDisableEnabled === 'boolean' ? input.latencyAutoDisableEnabled : undefined,
+    priorityUpdateEnabled:
+      typeof input.priorityUpdateEnabled === 'boolean' ? input.priorityUpdateEnabled : undefined,
+    priorityStrategy: input.priorityStrategy === undefined ? undefined : normalizePriorityStrategy(input.priorityStrategy),
     inspectionConcurrency: input.inspectionConcurrency === undefined ? undefined : normalizeConcurrency(input.inspectionConcurrency),
     balanceLowAction: input.balanceLowAction === undefined ? undefined : normalizeRuleAction(input.balanceLowAction),
     rateIncreaseAction: input.rateIncreaseAction === undefined ? undefined : normalizeRuleAction(input.rateIncreaseAction),
@@ -363,6 +408,22 @@ function normalizeConcurrency(value: unknown) {
 function normalizeRuleAction(value: unknown) {
   const action = typeof value === 'string' ? value.trim().toUpperCase() : 'NONE';
   return ruleActions.has(action) ? action : 'NONE';
+}
+
+function normalizePriorityStrategy(value: unknown) {
+  const strategy = typeof value === 'string' ? value.trim().toUpperCase() : 'RATE_FIRST';
+  return priorityStrategies.has(strategy) ? strategy : 'RATE_FIRST';
+}
+
+function normalizeBoolean(value: unknown, fallback: boolean) {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  if (typeof value === 'number') {
+    return value === 1;
+  }
+
+  return fallback;
 }
 
 function normalizePriority(value: unknown) {

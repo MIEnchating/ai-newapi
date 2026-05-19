@@ -61,7 +61,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 const { Header, Sider, Content } = Layout;
 const { Text, Title, Paragraph } = Typography;
 
-type View = 'overview' | 'channels' | 'rates' | 'credentials' | 'cpaPool' | 'alerts';
+type View = 'overview' | 'channels' | 'rates' | 'credentials' | 'inspection' | 'cpaPool' | 'alerts';
 type RelayType = 'newapi';
 type UpstreamProvider = 'newapi' | 'sub2api' | 'cli_proxy';
 type ChannelFormUpstreamType = UpstreamProvider | 'unknown';
@@ -214,10 +214,17 @@ type CpaPoolAccountView = {
   status: string;
   successCount: number;
   failureCount: number;
-  usage5h: number | null;
-  usage7d: number | null;
+  usage5h: CpaUsageMetric | number | null;
+  usage7d: CpaUsageMetric | number | null;
   lastRefresh?: string | null;
   refreshTime?: string | null;
+};
+
+type CpaUsageMetric = {
+  percent: number | null;
+  used?: number | null;
+  limit?: number | null;
+  label?: string | null;
 };
 
 type CpaPoolView = {
@@ -244,7 +251,10 @@ type InspectionView = {
   latencyTimeoutMs: number;
   latencyDisableThresholdMs: number;
   latencyFailureLimit: number;
+  latencyAutoDisableEnabled: boolean;
   disabledRetestMs: number;
+  priorityUpdateEnabled: boolean;
+  priorityStrategy: PriorityStrategy;
   cpaPreferred: boolean;
   inspectionConcurrency: number;
   balanceLowAction: InspectionRuleAction;
@@ -270,7 +280,10 @@ type InspectionUpdate = Partial<Pick<
   | 'latencyTimeoutMs'
   | 'latencyDisableThresholdMs'
   | 'latencyFailureLimit'
+  | 'latencyAutoDisableEnabled'
   | 'disabledRetestMs'
+  | 'priorityUpdateEnabled'
+  | 'priorityStrategy'
   | 'cpaPreferred'
   | 'inspectionConcurrency'
   | 'balanceLowAction'
@@ -280,6 +293,7 @@ type InspectionUpdate = Partial<Pick<
 >>;
 
 type InspectionRuleAction = 'NONE' | 'LOWER' | 'DISABLE';
+type PriorityStrategy = 'RATE_FIRST' | 'BALANCED';
 
 type UpstreamTypeDetection = {
   type: UpstreamProvider | 'unknown';
@@ -392,9 +406,13 @@ const notificationMethodOptions: Array<{ label: string; value: AlertNotification
   { label: 'Webhook', value: 'webhook' }
 ];
 const inspectionActionOptions: Array<{ label: string; value: InspectionRuleAction }> = [
-  { label: '只告警', value: 'NONE' },
+  { label: '只记录', value: 'NONE' },
   { label: '降低优权', value: 'LOWER' },
   { label: '禁用渠道', value: 'DISABLE' }
+];
+const priorityStrategyOptions: Array<{ label: string; value: PriorityStrategy }> = [
+  { label: '倍率优先', value: 'RATE_FIRST' },
+  { label: '均衡', value: 'BALANCED' }
 ];
 const intervalOptions = [
   { label: '5 分钟', value: 300_000 },
@@ -696,6 +714,7 @@ export default function DashboardPage() {
     { key: 'channels', icon: <CloudOutlined />, label: '渠道管理' },
     { key: 'rates', icon: <ThunderboltOutlined />, label: '倍率快照' },
     { key: 'credentials', icon: <KeyOutlined />, label: '平台凭证' },
+    { key: 'inspection', icon: <FieldTimeOutlined />, label: '自动巡检' },
     { key: 'cpaPool', icon: <DatabaseOutlined />, label: '号池管理' },
     { key: 'alerts', icon: <BellOutlined />, label: '告警' }
   ];
@@ -1367,6 +1386,9 @@ export default function DashboardPage() {
       mainStationGroup: values.upstreamType === 'cli_proxy' ? 'default' : values.mainStationGroup?.trim() || 'default',
       skipLatencyDisable: values.upstreamType === 'cli_proxy' ? false : values.skipLatencyDisable === true,
       createMainStation: !editingChannelId && values.upstreamType !== 'cli_proxy',
+      credential: values.upstreamType === 'cli_proxy'
+        ? values.credential?.trim() || values.credentialPassword?.trim()
+        : values.credential,
       priority: cliProxyPreferred ? 100 : values.priority,
       weight: cliProxyPreferred ? 10 : values.weight
     };
@@ -1962,18 +1984,12 @@ export default function DashboardPage() {
 
             {activeView === 'channels' ? (
               <Flex vertical gap={14}>
-                <ChannelGuide
-                  inspection={inspection}
-                  inspectionBusy={inspectionBusy}
-                  onUpdateInspection={updateInspection}
-                  onRunInspection={runInspectionNow}
-                />
                 <Card
                   title={
                     <div className="table-card-header">
                       <div className="table-card-title">
                         <Text strong>{selectedRelay?.name ?? 'NewAPI 主站'}</Text>
-                        <Text type="secondary">NewAPI / Sub2API 会保存到 MySQL；CPA 号池仅临时转发配置。</Text>
+                        <Text type="secondary">NewAPI / Sub2API / CPA 号池都会保存到 MySQL；敏感信息加密存储。</Text>
                       </div>
                     </div>
                   }
@@ -2034,6 +2050,18 @@ export default function DashboardPage() {
 
             {activeView === 'credentials' ? (
               <CredentialsView groups={credentialGroups} onEditGroup={openCredentialModal} />
+            ) : null}
+
+            {activeView === 'inspection' ? (
+              <InspectionPage
+                inspection={inspection}
+                inspectionBusy={inspectionBusy}
+                rules={alertRules}
+                savingRuleType={savingAlertRuleType}
+                onUpdateInspection={updateInspection}
+                onRunInspection={runInspectionNow}
+                onUpdateRule={updateAlertRule}
+              />
             ) : null}
 
             {activeView === 'cpaPool' ? (
@@ -2401,8 +2429,8 @@ export default function DashboardPage() {
           <Form.Item noStyle shouldUpdate={(prev, next) => prev.upstreamType !== next.upstreamType}>
             {({ getFieldValue }) =>
               getFieldValue('upstreamType') === 'cli_proxy' ? (
-                <FormSection title="号池管理" description="填写 CPA 管理密钥后，号池管理页可以读取账号成功/失败次数和用量队列。">
-                  <Form.Item name="credential" label="CPA 管理密钥" extra="留空表示不修改；只保存在服务端内存，不在页面回显。">
+                <FormSection title="号池管理" description="填写 CPA 管理密钥后，号池管理页可以读取账号成功/失败次数和限额用量。">
+                  <Form.Item name="credential" label="CPA 管理密钥" extra="留空表示不修改；保存到 MySQL，服务端加密存储，不在页面回显。">
                     <Input.Password placeholder="management key" autoComplete="new-password" />
                   </Form.Item>
                 </FormSection>
@@ -2435,7 +2463,7 @@ export default function DashboardPage() {
               name="enabled"
               label="启用状态"
               valuePropName="checked"
-              extra="关闭后会同步禁用主站渠道；CPA 号池只影响本地转发配置。"
+              extra="关闭后会同步禁用主站渠道；CPA 号池只影响号池记录状态。"
             >
               <Switch checkedChildren="使用中" unCheckedChildren="禁用" />
             </Form.Item>
@@ -2510,7 +2538,7 @@ export default function DashboardPage() {
               {({ getFieldValue }) =>
                 getFieldValue('upstreamType') === 'cli_proxy' ? (
                   <div className="form-note">
-                    <Text type="secondary">CPA 是号池模式，不读取余额、倍率和充值比例，只作为临时转发配置。</Text>
+                    <Text type="secondary">CPA 是号池模式，不读取余额、倍率和充值比例；管理密钥单独加密保存。</Text>
                   </div>
                 ) : null
               }
@@ -2935,15 +2963,49 @@ function OverviewView({
   );
 }
 
-function ChannelGuide({
+function InspectionPage({
   inspection,
   inspectionBusy,
+  rules,
+  savingRuleType,
   onUpdateInspection,
+  onRunInspection,
+  onUpdateRule
+}: {
+  inspection: InspectionView | null;
+  inspectionBusy: boolean;
+  rules: AlertRuleView[];
+  savingRuleType: AlertRuleType | null;
+  onUpdateInspection: (input: InspectionUpdate) => void;
+  onRunInspection: () => void;
+  onUpdateRule: (input: AlertRuleUpdate) => void;
+}) {
+  return (
+    <Flex vertical gap={16}>
+      <InspectionControlPanel
+        inspection={inspection}
+        inspectionBusy={inspectionBusy}
+        onRunInspection={onRunInspection}
+      />
+      <InspectionRulesPanel
+        inspection={inspection}
+        inspectionBusy={inspectionBusy}
+        rules={rules}
+        savingRuleType={savingRuleType}
+        onUpdateInspection={onUpdateInspection}
+        onUpdateRule={onUpdateRule}
+      />
+    </Flex>
+  );
+}
+
+function InspectionControlPanel({
+  inspection,
+  inspectionBusy,
   onRunInspection
 }: {
   inspection: InspectionView | null;
   inspectionBusy: boolean;
-  onUpdateInspection: (input: InspectionUpdate) => void;
   onRunInspection: () => void;
 }) {
   return (
@@ -2967,74 +3029,137 @@ function ChannelGuide({
             </Text>
           </div>
           <div className="inspection-actions">
-            <div className="inspection-control-group">
-              <Text type="secondary" className="inspection-control-title">巡检</Text>
-              <Switch
-                checked={Boolean(inspection?.enabled)}
-                loading={inspectionBusy}
-                checkedChildren="开"
-                unCheckedChildren="关"
-                onChange={(enabled) => onUpdateInspection({ enabled })}
-              />
-              <Select
-                className="inspection-interval"
-                value={inspection?.intervalMs ?? 900_000}
+            <Button icon={<FieldTimeOutlined />} loading={inspectionBusy} onClick={onRunInspection}>
+              立即巡检
+            </Button>
+          </div>
+        </div>
+      </Flex>
+    </Card>
+  );
+}
+
+type InspectionRuleRow = {
+  key: string;
+  name: string;
+  description: string;
+  condition: ReactNode;
+  action: ReactNode;
+};
+
+function InspectionRulesPanel({
+  inspection,
+  inspectionBusy,
+  rules,
+  savingRuleType,
+  onUpdateInspection,
+  onUpdateRule
+}: {
+  inspection: InspectionView | null;
+  inspectionBusy: boolean;
+  rules: AlertRuleView[];
+  savingRuleType: AlertRuleType | null;
+  onUpdateInspection: (input: InspectionUpdate) => void;
+  onUpdateRule: (input: AlertRuleUpdate) => void;
+}) {
+  const balanceRule = rules.find((rule) => rule.type === 'BALANCE_LOW');
+  const rateIncreaseRule = rules.find((rule) => rule.type === 'RATE_INCREASE');
+  const rows: InspectionRuleRow[] = [
+    {
+      key: 'schedule',
+      name: '巡检调度',
+      description: '控制 Worker 自动入队巡检的开关、间隔和并发。',
+      condition: (
+        <div className="inspection-rule-grid">
+          <RuleControl label="自动巡检">
+            <Switch
+              checked={Boolean(inspection?.enabled)}
+              loading={inspectionBusy}
+              checkedChildren="开"
+              unCheckedChildren="关"
+              onChange={(enabled) => onUpdateInspection({ enabled })}
+            />
+          </RuleControl>
+          <RuleControl label="巡检间隔">
+            <Select
+              className="inspection-interval"
+              value={inspection?.intervalMs ?? 900_000}
+              disabled={inspectionBusy}
+              onChange={(intervalMs) => onUpdateInspection({ intervalMs })}
+              options={intervalOptions}
+            />
+          </RuleControl>
+        </div>
+      ),
+      action: (
+        <RuleControl label="并发上限">
+          <DebouncedInspectionNumber
+            className="inspection-field-input inspection-field-input-small"
+            min={1}
+            max={20}
+            precision={0}
+            value={inspection?.inspectionConcurrency ?? 3}
+            disabled={inspectionBusy}
+            onCommit={(inspectionConcurrency) => onUpdateInspection({ inspectionConcurrency })}
+          />
+        </RuleControl>
+      )
+    },
+    {
+      key: 'latency',
+      name: '主站渠道测试',
+      description: '按主站渠道测试结果记录延迟，失败或超阈值时可自动禁用。',
+      condition: (
+        <div className="inspection-rule-grid">
+          <RuleControl label="启用测试">
+            <Switch
+              checked={inspection?.latencyTestEnabled ?? true}
+              loading={inspectionBusy}
+              checkedChildren="开"
+              unCheckedChildren="关"
+              onChange={(latencyTestEnabled) => onUpdateInspection({ latencyTestEnabled })}
+            />
+          </RuleControl>
+          <RuleControl label="测试间隔">
+            <Select
+              className="inspection-interval"
+              value={inspection?.latencyIntervalMs ?? 300_000}
+              disabled={inspectionBusy}
+              onChange={(latencyIntervalMs) => onUpdateInspection({ latencyIntervalMs })}
+              options={[
+                { label: '1 分钟', value: 60_000 },
+                { label: '5 分钟', value: 300_000 },
+                { label: '15 分钟', value: 900_000 },
+                { label: '30 分钟', value: 1_800_000 }
+              ]}
+            />
+          </RuleControl>
+          <RuleControl label="请求超时">
+            <Space.Compact className="inspection-rule-number">
+              <DebouncedInspectionNumber
+                className="compact-number-input"
+                size="small"
+                min={0.1}
+                max={120}
+                step={0.5}
+                value={msToSeconds(inspection?.latencyTimeoutMs ?? 10_000)}
                 disabled={inspectionBusy}
-                onChange={(intervalMs) => onUpdateInspection({ intervalMs })}
-                options={intervalOptions}
+                onCommit={(seconds) => onUpdateInspection({ latencyTimeoutMs: secondsToMs(seconds) })}
               />
-              <div className="inspection-field">
-                <Text type="secondary">并发</Text>
+              <Input className="number-affix number-suffix" size="small" value="秒" readOnly tabIndex={-1} />
+            </Space.Compact>
+          </RuleControl>
+        </div>
+      ),
+      action: (
+        <div className="inspection-rule-grid inspection-rule-grid-wide">
+          <RuleControl label="触发条件">
+            <Space size={6} wrap>
+              <Text type="secondary">延迟超过</Text>
+              <Space.Compact className="inspection-rule-number">
                 <DebouncedInspectionNumber
-                  className="inspection-field-input inspection-field-input-small"
-                  min={1}
-                  max={20}
-                  value={inspection?.inspectionConcurrency ?? 3}
-                  disabled={inspectionBusy}
-                  onCommit={(inspectionConcurrency) => onUpdateInspection({ inspectionConcurrency })}
-                />
-              </div>
-              <Button icon={<FieldTimeOutlined />} loading={inspectionBusy} onClick={onRunInspection}>
-                立即巡检
-              </Button>
-            </div>
-            <div className="inspection-control-group">
-              <Text type="secondary" className="inspection-control-title">主站渠道测试</Text>
-              <Switch
-                checked={inspection?.latencyTestEnabled ?? true}
-                loading={inspectionBusy}
-                checkedChildren="开"
-                unCheckedChildren="关"
-                onChange={(latencyTestEnabled) => onUpdateInspection({ latencyTestEnabled })}
-              />
-              <Select
-                className="inspection-interval"
-                value={inspection?.latencyIntervalMs ?? 300_000}
-                disabled={inspectionBusy}
-                onChange={(latencyIntervalMs) => onUpdateInspection({ latencyIntervalMs })}
-                options={[
-                  { label: '1 分钟', value: 60_000 },
-                  { label: '5 分钟', value: 300_000 },
-                  { label: '15 分钟', value: 900_000 },
-                  { label: '30 分钟', value: 1_800_000 }
-                ]}
-              />
-              <div className="inspection-field">
-                <Text type="secondary">超时(秒)</Text>
-                <DebouncedInspectionNumber
-                  className="inspection-field-input"
-                  min={0.1}
-                  max={120}
-                  step={0.5}
-                  value={msToSeconds(inspection?.latencyTimeoutMs ?? 10_000)}
-                  disabled={inspectionBusy}
-                  onCommit={(seconds) => onUpdateInspection({ latencyTimeoutMs: secondsToMs(seconds) })}
-                />
-              </div>
-              <div className="inspection-field">
-                <Text type="secondary">禁用阈值(秒)</Text>
-                <DebouncedInspectionNumber
-                  className="inspection-field-input"
+                  className="compact-number-input"
+                  size="small"
                   min={0.1}
                   max={120}
                   step={0.5}
@@ -3042,85 +3167,231 @@ function ChannelGuide({
                   disabled={inspectionBusy}
                   onCommit={(seconds) => onUpdateInspection({ latencyDisableThresholdMs: secondsToMs(seconds) })}
                 />
-              </div>
-              <div className="inspection-field">
-                <Text type="secondary">失败次数</Text>
+                <Input className="number-affix number-suffix" size="small" value="秒" readOnly tabIndex={-1} />
+              </Space.Compact>
+              <Text type="secondary">或连续失败</Text>
+              <Space.Compact className="inspection-rule-number">
                 <DebouncedInspectionNumber
-                  className="inspection-field-input inspection-field-input-small"
+                  className="compact-number-input"
+                  size="small"
                   min={1}
                   max={20}
+                  precision={0}
                   value={inspection?.latencyFailureLimit ?? 3}
                   disabled={inspectionBusy}
                   onCommit={(latencyFailureLimit) => onUpdateInspection({ latencyFailureLimit })}
                 />
-              </div>
-              <Select
-                className="inspection-retest"
-                value={inspection?.disabledRetestMs ?? 1_800_000}
-                disabled={inspectionBusy}
-                onChange={(disabledRetestMs) => onUpdateInspection({ disabledRetestMs })}
-                options={[
-                  { label: '禁用后 5 分钟复测', value: 300_000 },
-                  { label: '禁用后 30 分钟复测', value: 1_800_000 },
-                  { label: '禁用后 1 小时复测', value: 3_600_000 },
-                  { label: '禁用后 6 小时复测', value: 21_600_000 }
-                ]}
-              />
-            </div>
-            <div className="inspection-control-group">
-              <Text type="secondary" className="inspection-control-title">CPA 优先</Text>
-              <Switch
-                checked={inspection?.cpaPreferred ?? false}
-                loading={inspectionBusy}
-                checkedChildren="开"
-                unCheckedChildren="关"
-                onChange={(cpaPreferred) => onUpdateInspection({ cpaPreferred })}
-              />
-              <Text type="secondary" className="inspection-control-note">
-                可用时优先级 100 / 权重 10
-              </Text>
-              <Text type="secondary" className="inspection-control-title">余额不足</Text>
-              <Select
-                className="inspection-action-select"
-                value={inspection?.balanceLowAction ?? 'NONE'}
-                disabled={inspectionBusy}
-                onChange={(balanceLowAction) => onUpdateInspection({ balanceLowAction })}
-                options={inspectionActionOptions}
-              />
-              <Text type="secondary" className="inspection-control-title">倍率上涨</Text>
-              <Select
-                className="inspection-action-select"
-                value={inspection?.rateIncreaseAction ?? 'NONE'}
-                disabled={inspectionBusy}
-                onChange={(rateIncreaseAction) => onUpdateInspection({ rateIncreaseAction })}
-                options={inspectionActionOptions}
-              />
-              <div className="inspection-field">
-                <Text type="secondary">降到优/权</Text>
-                <Space.Compact className="inspection-dispatch-inputs">
-                  <DebouncedInspectionNumber
-                    min={0}
-                    max={100}
-                    precision={0}
-                    value={inspection?.ruleActionPriority ?? 10}
-                    disabled={inspectionBusy}
-                    onCommit={(ruleActionPriority) => onUpdateInspection({ ruleActionPriority })}
-                  />
-                  <DebouncedInspectionNumber
-                    min={0}
-                    max={10}
-                    precision={0}
-                    value={inspection?.ruleActionWeight ?? 0}
-                    disabled={inspectionBusy}
-                    onCommit={(ruleActionWeight) => onUpdateInspection({ ruleActionWeight })}
-                  />
-                </Space.Compact>
-              </div>
-            </div>
-          </div>
+                <Input className="number-affix number-suffix" size="small" value="次" readOnly tabIndex={-1} />
+              </Space.Compact>
+            </Space>
+          </RuleControl>
+          <RuleControl label="处理动作">
+            <Segmented
+              className="inspection-segmented"
+              size="small"
+              value={inspection?.latencyAutoDisableEnabled === false ? 'RECORD' : 'DISABLE'}
+              disabled={inspectionBusy}
+              onChange={(value) => onUpdateInspection({ latencyAutoDisableEnabled: value === 'DISABLE' })}
+              options={[
+                { label: '自动禁用', value: 'DISABLE' },
+                { label: '只记录', value: 'RECORD' }
+              ]}
+            />
+          </RuleControl>
+          <RuleControl label="复测时间">
+            <Select
+              className="inspection-retest"
+              value={inspection?.disabledRetestMs ?? 1_800_000}
+              disabled={inspectionBusy}
+              onChange={(disabledRetestMs) => onUpdateInspection({ disabledRetestMs })}
+              options={[
+                { label: '禁用后 5 分钟复测', value: 300_000 },
+                { label: '禁用后 30 分钟复测', value: 1_800_000 },
+                { label: '禁用后 1 小时复测', value: 3_600_000 },
+                { label: '禁用后 6 小时复测', value: 21_600_000 }
+              ]}
+            />
+          </RuleControl>
         </div>
-      </Flex>
+      )
+    },
+    {
+      key: 'priority',
+      name: '优权回写策略',
+      description: '巡检后是否写回主站优先级和权重，以及使用哪种排序策略。',
+      condition: (
+        <RuleControl label="写回主站">
+          <Switch
+            checked={inspection?.priorityUpdateEnabled ?? true}
+            loading={inspectionBusy}
+            checkedChildren="开"
+            unCheckedChildren="不动"
+            onChange={(priorityUpdateEnabled) => onUpdateInspection({ priorityUpdateEnabled })}
+          />
+        </RuleControl>
+      ),
+      action: (
+        <RuleControl label="排序策略">
+          <Segmented
+            className="inspection-segmented"
+            size="small"
+            value={inspection?.priorityStrategy ?? 'RATE_FIRST'}
+            disabled={inspectionBusy || inspection?.priorityUpdateEnabled === false}
+            onChange={(priorityStrategy) => onUpdateInspection({ priorityStrategy: priorityStrategy as PriorityStrategy })}
+            options={priorityStrategyOptions}
+          />
+        </RuleControl>
+      )
+    },
+    {
+      key: 'cpaPreferred',
+      name: 'CPA 优先',
+      description: 'CPA 号池可用时是否提升主站渠道调度优先级。',
+      condition: (
+        <RuleControl label="启用 CPA 优先">
+          <Switch
+            checked={inspection?.cpaPreferred ?? false}
+            loading={inspectionBusy}
+            checkedChildren="开"
+            unCheckedChildren="关"
+            onChange={(cpaPreferred) => onUpdateInspection({ cpaPreferred })}
+          />
+        </RuleControl>
+      ),
+      action: <RuleControl label="写回目标"><Text>优先级 100 / 权重 10</Text></RuleControl>
+    },
+    {
+      key: 'balance',
+      name: '余额不足',
+      description: '上游余额低于阈值时执行。',
+      condition: balanceRule ? (
+        <RuleControl label="余额阈值">
+          <AlertRuleThreshold
+            rule={balanceRule}
+            disabled={inspectionBusy || savingRuleType === balanceRule.type}
+            onUpdateRule={onUpdateRule}
+          />
+        </RuleControl>
+      ) : <Text type="secondary">未初始化阈值</Text>,
+      action: (
+        <RuleControl label="触发后">
+          <Select
+            className="inspection-action-select"
+            value={inspection?.balanceLowAction ?? 'NONE'}
+            disabled={inspectionBusy}
+            onChange={(balanceLowAction) => onUpdateInspection({ balanceLowAction })}
+            options={inspectionActionOptions}
+          />
+        </RuleControl>
+      )
+    },
+    {
+      key: 'rate',
+      name: '倍率上涨',
+      description: '模型倍率上涨超过阈值时执行。',
+      condition: rateIncreaseRule ? (
+        <RuleControl label="上涨阈值">
+          <AlertRuleThreshold
+            rule={rateIncreaseRule}
+            disabled={inspectionBusy || savingRuleType === rateIncreaseRule.type}
+            onUpdateRule={onUpdateRule}
+          />
+        </RuleControl>
+      ) : <Text type="secondary">未初始化阈值</Text>,
+      action: (
+        <RuleControl label="触发后">
+          <Select
+            className="inspection-action-select"
+            value={inspection?.rateIncreaseAction ?? 'NONE'}
+            disabled={inspectionBusy}
+            onChange={(rateIncreaseAction) => onUpdateInspection({ rateIncreaseAction })}
+            options={inspectionActionOptions}
+          />
+        </RuleControl>
+      )
+    },
+    {
+      key: 'dispatch',
+      name: '降低优权目标',
+      description: '当动作选择“降低优权”时，写回主站渠道的目标优先级和权重。',
+      condition: <Text type="secondary">适用于余额不足、倍率上涨</Text>,
+      action: (
+        <div className="inspection-rule-grid">
+          <RuleControl label="目标优先级">
+            <DebouncedInspectionNumber
+              className="inspection-field-input inspection-field-input-small"
+              size="small"
+              min={0}
+              max={100}
+              precision={0}
+              value={inspection?.ruleActionPriority ?? 10}
+              disabled={inspectionBusy}
+              onCommit={(ruleActionPriority) => onUpdateInspection({ ruleActionPriority })}
+            />
+          </RuleControl>
+          <RuleControl label="目标权重">
+            <DebouncedInspectionNumber
+              className="inspection-field-input inspection-field-input-small"
+              size="small"
+              min={0}
+              max={10}
+              precision={0}
+              value={inspection?.ruleActionWeight ?? 0}
+              disabled={inspectionBusy}
+              onCommit={(ruleActionWeight) => onUpdateInspection({ ruleActionWeight })}
+            />
+          </RuleControl>
+        </div>
+      )
+    }
+  ];
+  const columns: ColumnsType<InspectionRuleRow> = [
+    {
+      title: '巡检项',
+      key: 'name',
+      width: 220,
+      render: (_, record) => (
+        <Flex vertical gap={4}>
+          <Text strong>{record.name}</Text>
+          <Text type="secondary" className="table-subtle">{record.description}</Text>
+        </Flex>
+      )
+    },
+    {
+      title: '触发条件',
+      dataIndex: 'condition',
+      width: 420
+    },
+    {
+      title: '执行动作',
+      dataIndex: 'action',
+      width: 500
+    }
+  ];
+
+  return (
+    <Card
+      title="巡检规则统一配置"
+      extra={<Text type="secondary">这里配置系统动作；通知方式到“告警”页配置。</Text>}
+    >
+      <Table
+        rowKey="key"
+        columns={columns}
+        dataSource={rows}
+        pagination={false}
+        size="middle"
+        scroll={{ x: 1140 }}
+      />
     </Card>
+  );
+}
+
+function RuleControl({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="inspection-rule-control">
+      <Text type="secondary" className="inspection-rule-label">{label}</Text>
+      <div className="inspection-rule-control-body">{children}</div>
+    </div>
   );
 }
 
@@ -3140,6 +3411,7 @@ function DebouncedInspectionNumber({
   max?: number;
   step?: number;
   precision?: number;
+  size?: 'small' | 'middle' | 'large';
 }) {
   const [draftValue, setDraftValue] = useState<number | null>(value);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -3646,12 +3918,10 @@ function CpaPoolPanel({
     <Card
       className="cpa-pool-card"
       title={
-        <Flex vertical gap={2}>
-          <Text strong>CPA 号池账号</Text>
-          <Text type="secondary" className="table-subtle">
-            账号健康、调用次数和限额占用
-          </Text>
-        </Flex>
+        <div className="table-card-title">
+          <Text strong>CPA 号池</Text>
+          <Text type="secondary">账号状态、调用结果和限额用量</Text>
+        </div>
       }
       extra={
         <Space size={8} wrap className="toolbar-inline">
@@ -3669,16 +3939,22 @@ function CpaPoolPanel({
       }
     >
       <Flex vertical gap={12}>
-        <div className="cpa-pool-summary">
-          <Flex vertical gap={2} className="cpa-pool-endpoint">
-            <Text strong>{data.channel?.name ?? '未选择号池'}</Text>
+        <div className="cpa-metric-grid">
+          <div className="cpa-endpoint-panel">
+            <Text type="secondary" className="cpa-metric-label">当前渠道</Text>
+            <Text strong className="truncate-text">{data.channel?.name ?? '未选择号池'}</Text>
             <Text type="secondary" className="truncate-text">{data.channel?.baseUrl ?? '-'}</Text>
-          </Flex>
-          <Statistic title="账号" value={accounts.length} />
-          <Statistic title="正常" value={normalCount} valueStyle={{ color: '#0f766e' }} />
-          <Statistic title="非正常" value={abnormalCount} valueStyle={{ color: abnormalCount > 0 ? '#b42318' : '#667085' }} />
-          {data.usageQueueError ? <Tag color="gold">用量队列未采集完整</Tag> : null}
-          {data.refreshedAt ? <Tag>刷新 {formatDateTime(data.refreshedAt)}</Tag> : null}
+          </div>
+          <CpaMetric label="账号" value={String(accounts.length)} />
+          <CpaMetric label="正常" value={String(normalCount)} tone="ok" />
+          <CpaMetric label="异常" value={String(abnormalCount)} tone={abnormalCount > 0 ? 'error' : 'muted'} />
+          <div className="cpa-metric">
+            <Text type="secondary" className="cpa-metric-label">刷新</Text>
+            <Text strong>{data.refreshedAt ? formatDateTime(data.refreshedAt) : '-'}</Text>
+            <Text type={data.usageQueueError ? 'warning' : 'secondary'} className="table-subtle">
+              {data.usageQueueError ? '用量队列未采集完整' : '队列正常'}
+            </Text>
+          </div>
         </div>
         <Table
           rowKey="key"
@@ -3695,16 +3971,27 @@ function CpaPoolPanel({
   );
 }
 
+function CpaMetric({ label, value, tone = 'default' }: { label: string; value: string; tone?: 'default' | 'ok' | 'error' | 'muted' }) {
+  return (
+    <div className={`cpa-metric cpa-metric-${tone}`}>
+      <Text type="secondary" className="cpa-metric-label">{label}</Text>
+      <Text strong className="cpa-metric-value">{value}</Text>
+    </div>
+  );
+}
+
 function AlertsView({
   events,
   rules,
   savingRuleType,
-  onUpdateRule
+  onUpdateRule,
+  title = '告警规则'
 }: {
   events: EventItem[];
   rules: AlertRuleView[];
   savingRuleType: AlertRuleType | null;
   onUpdateRule: (input: AlertRuleUpdate) => void;
+  title?: string;
 }) {
   const columns: ColumnsType<AlertRuleView> = [
     {
@@ -3814,7 +4101,7 @@ function AlertsView({
     <Row gutter={[16, 16]}>
       <Col xs={24} xl={16}>
         <Card
-          title="告警规则"
+          title={title}
           extra={
             <Space size={10} wrap>
               <Text type="secondary">提醒方式为空时只进事件流</Text>
@@ -4167,7 +4454,7 @@ function AuthHint({ type, auth, prefix, suffix }: { type?: ChannelFormUpstreamTy
   }
 
   if (type === 'cli_proxy') {
-    text = 'CPA 是号池模式，不读取余额和倍率，也不会写入 MySQL 的上游监控表。';
+    text = 'CPA 是号池模式，不读取余额和倍率；渠道和管理密钥会写入 MySQL，号池管理页读取账号用量。';
   }
 
   return (
@@ -4235,12 +4522,15 @@ function StatusTag({ tone, children }: { tone: StatusTone; children: ReactNode }
   return <Tag color={color}>{children}</Tag>;
 }
 
-function UsagePercent({ value }: { value: number | null | undefined }) {
-  if (value === null || value === undefined || !Number.isFinite(Number(value))) {
-    return <Text type="secondary">-</Text>;
+function UsagePercent({ value }: { value: CpaUsageMetric | number | null | undefined }) {
+  const metric = normalizeUsageMetric(value);
+
+  if (!metric || metric.percent === null || !Number.isFinite(Number(metric.percent))) {
+    return <Text type="secondary" className="usage-empty">未上报</Text>;
   }
 
-  const percent = Math.max(0, Math.min(100, Number(value)));
+  const percent = Math.max(0, Math.min(100, Number(metric.percent)));
+  const detail = metric.label ?? usageMetricLabel(metric);
 
   return (
     <Flex vertical gap={4} className="usage-percent">
@@ -4250,9 +4540,35 @@ function UsagePercent({ value }: { value: number | null | undefined }) {
         showInfo={false}
         strokeColor={percent >= 90 ? '#d92d20' : percent >= 70 ? '#d97706' : '#0f766e'}
       />
-      <Text>{formatPercent(percent)}</Text>
+      <Space size={6} className="usage-percent-row">
+        <Text strong>{formatPercent(percent)}</Text>
+        {detail ? <Text type="secondary">{detail}</Text> : null}
+      </Space>
     </Flex>
   );
+}
+
+function normalizeUsageMetric(value: CpaUsageMetric | number | null | undefined): CpaUsageMetric | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? { percent: value } : null;
+  }
+
+  return value;
+}
+
+function usageMetricLabel(metric: CpaUsageMetric) {
+  if (metric.used === null || metric.used === undefined || metric.limit === null || metric.limit === undefined) {
+    return null;
+  }
+
+  return `${formatUsageNumber(metric.used)} / ${formatUsageNumber(metric.limit)}`;
+}
+
+function formatUsageNumber(value: number) {
+  return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
 }
 
 function cpaAccountStatusTone(value: string): StatusTone {
@@ -5259,6 +5575,7 @@ function viewTitle(view: View) {
     channels: '渠道管理',
     rates: '倍率快照',
     credentials: '平台凭证',
+    inspection: '自动巡检',
     cpaPool: '号池管理',
     alerts: '告警事件'
   }[view];
@@ -5270,6 +5587,7 @@ function viewDescription(view: View) {
     channels: '新增上游渠道，凭证在平台凭证里统一配置。',
     rates: '查看按渠道保存的倍率快照和变化。',
     credentials: '按平台分组管理 Token 或账号/密码凭证，同组渠道共用一套。',
+    inspection: '配置主站渠道延迟测试、优先级策略和巡检规则。',
     cpaPool: '查看 CPA 号池账号成功、失败和近期开销。',
     alerts: '查看同步失败、倍率变化和受限监控事件。'
   }[view];

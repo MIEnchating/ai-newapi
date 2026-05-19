@@ -49,10 +49,6 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'only newapi, sub2api and cli_proxy are supported' }, { status: 400 });
   }
 
-  if (body.type === 'cli_proxy') {
-    return NextResponse.json({ error: 'CPA 号池是本地临时配置，不能持久化为上游' }, { status: 400 });
-  }
-
   try {
     const upstream = await createBackendChannel({
       name: body.name,

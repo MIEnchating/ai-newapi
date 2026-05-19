@@ -30,7 +30,10 @@ export async function PATCH(request: Request) {
       latencyTimeoutMs?: number;
       latencyDisableThresholdMs?: number;
       latencyFailureLimit?: number;
+      latencyAutoDisableEnabled?: boolean;
       disabledRetestMs?: number;
+      priorityUpdateEnabled?: boolean;
+      priorityStrategy?: 'RATE_FIRST' | 'BALANCED';
       cpaPreferred?: boolean;
       inspectionConcurrency?: number;
       balanceLowAction?: 'NONE' | 'LOWER' | 'DISABLE';

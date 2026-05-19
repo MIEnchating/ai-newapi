@@ -55,6 +55,7 @@ export type ChannelRecord = {
   latencyFailureCount?: number;
   latencySuccessCount?: number;
   latencyLastError?: string | null;
+  lastError?: string | null;
   disabledByLatency?: boolean;
   latencyDisabledAt?: string | null;
   latencyNextCheckAt?: string | null;

@@ -63,7 +63,10 @@ export type InspectionStatus = {
   latencyTimeoutMs: number;
   latencyDisableThresholdMs: number;
   latencyFailureLimit: number;
+  latencyAutoDisableEnabled: boolean;
   disabledRetestMs: number;
+  priorityUpdateEnabled: boolean;
+  priorityStrategy: 'RATE_FIRST' | 'BALANCED';
   cpaPreferred: boolean;
   inspectionConcurrency: number;
   balanceLowAction: 'NONE' | 'LOWER' | 'DISABLE';
@@ -125,7 +128,7 @@ export type BackendRateEvent = {
   upstream?: {
     id: string;
     name: string;
-    type: 'NEWAPI' | 'SUB2API';
+    type: 'NEWAPI' | 'SUB2API' | 'CLI_PROXY';
     status: string;
   };
 };
@@ -158,7 +161,7 @@ type MainStationSyncResult = {
 type BackendUpstream = {
   id: string;
   name: string;
-  type: 'NEWAPI' | 'SUB2API';
+  type: 'NEWAPI' | 'SUB2API' | 'CLI_PROXY';
   baseUrl: string;
   authMode: 'API_KEY' | 'PASSWORD' | 'USER_TOKEN' | 'SESSION' | 'ADMIN_TOKEN';
   groupName?: string | null;
@@ -198,6 +201,39 @@ type BackendUpstream = {
     rateSnapshots?: number;
     rateChangeEvents?: number;
   };
+};
+
+export type BackendCpaUsageMetric = {
+  percent: number | null;
+  used?: number | null;
+  limit?: number | null;
+  label?: string | null;
+};
+
+export type BackendCpaPoolAccount = {
+  key: string;
+  index: string;
+  name: string;
+  account: string;
+  provider: string;
+  status: string;
+  successCount: number;
+  failureCount: number;
+  usage5h: BackendCpaUsageMetric | number | null;
+  usage7d: BackendCpaUsageMetric | number | null;
+  lastRefresh?: string | null;
+  refreshTime?: string | null;
+};
+
+export type BackendCpaPool = {
+  channel?: {
+    id: string;
+    name: string;
+    baseUrl: string;
+  };
+  accounts: BackendCpaPoolAccount[];
+  usageQueueError?: string | null;
+  refreshedAt?: string;
 };
 
 export async function getBackendRelay(channelCount = 0) {
@@ -296,6 +332,10 @@ export async function deleteBackendChannel(id: string) {
   });
 }
 
+export async function fetchBackendCpaPool(id: string) {
+  return backendJson<BackendCpaPool>(`/upstreams/${encodeURIComponent(id)}/cpa-pool`);
+}
+
 export async function syncBackendChannel(id: string) {
   return backendJson(`/upstreams/${encodeURIComponent(id)}/sync`, {
     method: 'POST'
@@ -315,7 +355,10 @@ export async function updateInspectionStatus(input: Partial<Pick<
   | 'latencyTimeoutMs'
   | 'latencyDisableThresholdMs'
   | 'latencyFailureLimit'
+  | 'latencyAutoDisableEnabled'
   | 'disabledRetestMs'
+  | 'priorityUpdateEnabled'
+  | 'priorityStrategy'
   | 'cpaPreferred'
   | 'inspectionConcurrency'
   | 'balanceLowAction'
@@ -399,6 +442,17 @@ function toBackendPayload(input: ChannelInput, partial = false) {
 }
 
 function toCredentialPayload(input: ChannelInput) {
+  if (input.upstreamType === 'cli_proxy') {
+    const managementKey = input.credential?.trim() || input.credentialPassword?.trim();
+
+    return managementKey
+      ? {
+          managementKey,
+          token: managementKey
+        }
+      : undefined;
+  }
+
   if (input.auth === '用户登录') {
     const account = input.credentialAccount?.trim();
     const password = input.credentialPassword?.trim();
@@ -438,12 +492,54 @@ function toCredentialPayload(input: ChannelInput) {
 }
 
 function toChannelRecord(upstream: BackendUpstream): ChannelRecord {
-  const upstreamType = upstream.type.toLowerCase() as Exclude<UpstreamProvider, 'cli_proxy'>;
+  const upstreamType = upstream.type.toLowerCase() as UpstreamProvider;
   const credentialConfigured = Boolean(upstream.credential);
   const status = statusLabel(upstream.status, credentialConfigured, Boolean(upstream.disabledByLatency));
   const groupRate = latestGroupRate(upstream);
   const nameParts = splitChannelName(upstream.name);
   const upstreamName = normalizePlatformGroupName(upstream.upstreamName, upstream.name, nameParts.platformGroupName);
+
+  if (upstreamType === 'cli_proxy') {
+    return {
+      id: upstream.id,
+      relayId: DEFAULT_RELAY_ID,
+      source: 'manual',
+      name: upstream.name,
+      group: 'default',
+      mainStationGroup: upstream.mainStationGroupName ?? 'default',
+      upstreamType,
+      upstreamName,
+      upstreamBaseUrl: upstream.baseUrl,
+      upstreamUserId: upstream.upstreamUserId ?? '',
+      keyName: upstream.keyName ?? '',
+      skipLatencyDisable: false,
+      enabled: upstream.status !== 'DISABLED',
+      auth: authLabel(upstream.authMode, upstreamType),
+      credentialConfigured,
+      status: upstream.status === 'DISABLED' ? '已禁用' : '仅转发',
+      statusTone: upstream.status === 'ERROR' ? 'error' : 'limited',
+      balance: '-',
+      models: 0,
+      groupRatio: null,
+      rateSource: '不适用',
+      rechargeRatio: normalizeRechargeRatio(upstream.rechargeRatio, 1),
+      currentRate: null,
+      previousRate: null,
+      cf: '不适用',
+      priority: normalizeInteger(upstream.priority, 50),
+      weight: normalizeInteger(upstream.weight, 0),
+      latencyMs: null,
+      latencyCheckedAt: null,
+      latencyFailureCount: 0,
+      latencySuccessCount: 0,
+      latencyLastError: null,
+      lastError: upstream.lastError ?? null,
+      disabledByLatency: false,
+      latencyDisabledAt: null,
+      latencyNextCheckAt: null,
+      sync: '不适用'
+    };
+  }
 
   return {
     id: upstream.id,
@@ -478,6 +574,7 @@ function toChannelRecord(upstream: BackendUpstream): ChannelRecord {
     latencyFailureCount: normalizeInteger(upstream.latencyFailureCount, 0),
     latencySuccessCount: normalizeInteger(upstream.latencySuccessCount, 0),
     latencyLastError: upstream.latencyLastError ?? null,
+    lastError: upstream.lastError ?? null,
     disabledByLatency: Boolean(upstream.disabledByLatency),
     latencyDisabledAt: upstream.latencyDisabledAt ?? null,
     latencyNextCheckAt: upstream.latencyNextCheckAt ?? null,
@@ -622,7 +719,11 @@ function toAuthMode(auth: string) {
   return 'USER_TOKEN';
 }
 
-function authLabel(authMode: BackendUpstream['authMode'], upstreamType: Exclude<UpstreamProvider, 'cli_proxy'>) {
+function authLabel(authMode: BackendUpstream['authMode'], upstreamType: UpstreamProvider) {
+  if (upstreamType === 'cli_proxy') {
+    return '无鉴权';
+  }
+
   if (authMode === 'API_KEY') {
     return 'API Key';
   }

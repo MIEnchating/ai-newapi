@@ -22,6 +22,9 @@ export class InspectionController {
       latencyDisableThresholdMs?: number;
       latencyFailureLimit?: number;
       disabledRetestMs?: number;
+      latencyAutoDisableEnabled?: boolean;
+      priorityUpdateEnabled?: boolean;
+      priorityStrategy?: string;
       cpaPreferred?: boolean;
       inspectionConcurrency?: number;
       balanceLowAction?: string;

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
-import { getStore, type CpaUsageRecord } from '../store';
+import { getStore, mergePersistentChannels, type CpaUsageRecord } from '../store';
 import { requireAuth } from '../auth/session';
+import { fetchBackendCpaPool, listBackendChannels } from '../backend-upstreams';
 
 const usageRetentionMs = 7 * 24 * 60 * 60_000;
 
@@ -13,14 +14,16 @@ export async function GET(request: Request) {
   const store = getStore();
   const url = new URL(request.url);
   const requestedChannelId = url.searchParams.get('channelId')?.trim();
-  const cpaChannels = store.channels.filter((channel) => channel.upstreamType === 'cli_proxy');
+  const persistentChannels = await listBackendChannels().catch(() => null);
+  const channels = persistentChannels ? mergePersistentChannels(store, persistentChannels) : store.channels;
+  const cpaChannels = channels.filter((channel) => channel.upstreamType === 'cli_proxy');
   const channel = requestedChannelId
     ? cpaChannels.find((item) => item.id === requestedChannelId)
-    : cpaChannels.find((item) => store.channelSecrets[item.id]?.credential) ?? cpaChannels[0];
+    : cpaChannels.find((item) => item.credentialConfigured || store.channelSecrets[item.id]?.credential) ?? cpaChannels[0];
   const channelOptions = cpaChannels.map((item) => ({
     id: item.id,
     name: item.name,
-    credentialConfigured: Boolean(store.channelSecrets[item.id]?.credential)
+    credentialConfigured: Boolean(item.credentialConfigured || store.channelSecrets[item.id]?.credential)
   }));
 
   if (!channel) {
@@ -28,6 +31,24 @@ export async function GET(request: Request) {
   }
 
   const managementKey = store.channelSecrets[channel.id]?.credential?.trim();
+  if (!managementKey && channel.credentialConfigured) {
+    try {
+      const backendPool = await fetchBackendCpaPool(channel.id);
+
+      return NextResponse.json({
+        ...backendPool,
+        channels: channelOptions
+      });
+    } catch (error) {
+      return NextResponse.json({
+        error: errorMessage(error),
+        channel: channelSummary(channel),
+        channels: channelOptions,
+        accounts: []
+      }, { status: 502 });
+    }
+  }
+
   if (!managementKey) {
     return NextResponse.json({
       error: 'CPA 号池缺少管理密钥，请在渠道配置里填写 CPA 管理密钥',
@@ -125,6 +146,10 @@ function parseAuthFiles(value: unknown) {
         record.usage5h,
         record.usage_5_hours,
         record.usage5Hours,
+        record.five_hour,
+        record.fiveHour,
+        record.five_hours,
+        record.fiveHours,
         record.five_hour_usage,
         record.fiveHourUsage,
         record.five_hours_usage,
@@ -136,12 +161,16 @@ function parseAuthFiles(value: unknown) {
         record.five_hours_limit_usage,
         record.fiveHoursLimitUsage,
         record.limit_usage_5h,
-        record.limitUsage5h
+        record.limitUsage5h,
+        usageMetricFromPair(firstDefined(record.five_hour_used, record.fiveHourUsed, record.five_hours_used, record.fiveHoursUsed, record.usage_5h_used, record.usage5hUsed, record.used_5h, record.used5h), firstDefined(record.five_hour_limit, record.fiveHourLimit, record.five_hours_limit, record.fiveHoursLimit, record.usage_5h_limit, record.usage5hLimit, record.limit_5h, record.limit5h)),
+        usageMetricFromPair(firstDefined(record.five_hour_usage, record.fiveHourUsage, record.five_hours_usage, record.fiveHoursUsage), firstDefined(record.five_hour_limit, record.fiveHourLimit, record.five_hours_limit, record.fiveHoursLimit))
       ),
     usage7d:
       percentageValue(
         record.usage_7d,
         record.usage7d,
+        record.week,
+        record.weekly,
         record.week_usage,
         record.weekUsage,
         record.weekly_usage,
@@ -155,7 +184,9 @@ function parseAuthFiles(value: unknown) {
         record.weekly_limit_usage,
         record.weeklyLimitUsage,
         record.limit_usage_7d,
-        record.limitUsage7d
+        record.limitUsage7d,
+        usageMetricFromPair(firstDefined(record.week_used, record.weekUsed, record.weekly_used, record.weeklyUsed, record.usage_7d_used, record.usage7dUsed, record.used_7d, record.used7d), firstDefined(record.week_limit, record.weekLimit, record.weekly_limit, record.weeklyLimit, record.usage_7d_limit, record.usage7dLimit, record.limit_7d, record.limit7d)),
+        usageMetricFromPair(firstDefined(record.week_usage, record.weekUsage, record.weekly_usage, record.weeklyUsage), firstDefined(record.week_limit, record.weekLimit, record.weekly_limit, record.weeklyLimit))
       ),
     lastRefresh:
       stringValue(record.last_refresh) ??
@@ -319,16 +350,105 @@ function numeric(value: unknown) {
 
 function percentageValue(...values: unknown[]) {
   for (const value of values) {
-    const parsed = numeric(value);
-    if (parsed === undefined) {
-      continue;
+    const metric = usageMetricFromValue(value);
+    if (metric) {
+      return metric;
     }
-
-    const percent = parsed > 0 && parsed <= 1 ? parsed * 100 : parsed;
-    return Math.max(0, Math.min(100, Math.round(percent * 100) / 100));
   }
 
   return null;
+}
+
+function usageMetricFromValue(value: unknown): { percent: number | null; used?: number | null; limit?: number | null; label?: string | null } | null {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+
+  const parsed = numeric(value);
+  if (parsed !== undefined) {
+    return { percent: normalizePercent(parsed) };
+  }
+
+  if (typeof value === 'string') {
+    const text = value.trim();
+    const pair = /^([0-9]+(?:\.[0-9]+)?)\s*\/\s*([0-9]+(?:\.[0-9]+)?)/.exec(text);
+    if (pair) {
+      return usageMetricFromPair(Number(pair[1]), Number(pair[2]));
+    }
+    const percent = /^([0-9]+(?:\.[0-9]+)?)\s*%$/.exec(text);
+    if (percent) {
+      return { percent: normalizePercent(Number(percent[1])), label: text };
+    }
+  }
+
+  const record = recordValue(value);
+  if (!record) {
+    return null;
+  }
+
+  const paired = usageMetricFromPair(
+    firstDefined(record.used, record.current, record.count, record.usage, record.used_count, record.usedCount, record.consumed),
+    firstDefined(record.limit, record.max, record.maximum, record.quota, record.total, record.cap)
+  );
+  if (paired) {
+    return paired;
+  }
+
+  const percent = firstNumeric(
+    record.percent,
+    record.percentage,
+    record.usage_percent,
+    record.usagePercent,
+    record.limit_percent,
+    record.limitPercent,
+    record.rate,
+    record.ratio
+  );
+  if (percent !== undefined) {
+    return { percent: normalizePercent(percent) };
+  }
+
+  return usageMetricFromValue(record.usage) ?? usageMetricFromValue(record.value);
+}
+
+function usageMetricFromPair(usedValue: unknown, limitValue: unknown) {
+  const used = numeric(usedValue);
+  const limit = numeric(limitValue);
+
+  if (used === undefined || limit === undefined || limit <= 0) {
+    return null;
+  }
+
+  return {
+    percent: normalizePercent((used / limit) * 100),
+    used,
+    limit,
+    label: `${formatUsageNumber(used)} / ${formatUsageNumber(limit)}`
+  };
+}
+
+function firstDefined(...values: unknown[]) {
+  return values.find((value) => value !== undefined && value !== null && value !== '');
+}
+
+function firstNumeric(...values: unknown[]) {
+  for (const value of values) {
+    const parsed = numeric(value);
+    if (parsed !== undefined) {
+      return parsed;
+    }
+  }
+
+  return undefined;
+}
+
+function normalizePercent(value: number) {
+  const percent = value > 0 && value <= 1 ? value * 100 : value;
+  return Math.max(0, Math.min(100, Math.round(percent * 100) / 100));
+}
+
+function formatUsageNumber(value: number) {
+  return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
 }
 
 function booleanValue(value: unknown) {

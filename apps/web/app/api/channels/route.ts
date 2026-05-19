@@ -14,7 +14,14 @@ import {
   type StatusTone,
   type UpstreamProvider
 } from '../store';
-import { createBackendChannel, deleteBackendChannel, getInspectionStatus, listBackendChannels, updateBackendChannel } from '../backend-upstreams';
+import {
+  createBackendChannel,
+  deleteBackendChannel,
+  getInspectionStatus,
+  listBackendChannels,
+  updateBackendChannel,
+  type ChannelInput
+} from '../backend-upstreams';
 import { requireAuth } from '../auth/session';
 
 export async function GET(request: Request) {
@@ -47,25 +54,22 @@ export async function POST(request: Request) {
 
   if (body.upstreamType === 'cli_proxy') {
     const cpaPreferred = await cliProxyPreferredActive(body.upstreamBaseUrl);
-    const channel = createTransientChannel(body, relayId as string, cpaPreferred);
-    const managementKey = body.credential?.trim();
-
-    if (managementKey) {
-      store.channelSecrets[channel.id] = { credential: managementKey };
-      channel.credentialConfigured = true;
-    }
-    store.channels = [channel, ...store.channels.filter((item) => item.id !== channel.id)];
-    store.cpaChannelOverrides[channel.id] = channel;
-    persistCpaStore(store);
-    appendEvent(store, {
-      title: `新增渠道 ${body.name}`,
-      detail: `${providerLabel(body.upstreamType)} / ${body.auth} / 仅本地临时配置`,
-      time: currentTime(),
-      status: 'success'
+    const channelInput = cpaBackendPayload(body, {
+      relayId: relayId as string,
+      cpaPreferred,
+      fallbackPriority: 50,
+      fallbackWeight: 0
     });
-    syncRelayCounts(store);
 
-    return NextResponse.json({ channel });
+    try {
+      const channel = await createBackendChannel(channelInput);
+      appendEvent(store, channelEvent('新增渠道', channel));
+      const channels = await loadChannels();
+
+      return NextResponse.json({ channel, channels, events: store.events, relays: store.relays });
+    } catch (error) {
+      return NextResponse.json({ error: errorMessage(error) }, { status: 502 });
+    }
   }
 
   try {
@@ -106,37 +110,26 @@ export async function PATCH(request: Request) {
     }
 
     const cpaPreferred = await cliProxyPreferredActive(body.upstreamBaseUrl ?? existing.upstreamBaseUrl);
-    const managementKey = body.credential?.trim();
-    const channel = normalizeChannel({
-      ...existing,
+    const channelInput = cpaBackendPayload(body, {
+      existing,
       relayId: body.relayId ?? existing.relayId,
-      name: body.name?.trim() ?? existing.name,
-      group: body.group?.trim() ?? existing.group,
-      upstreamType: 'cli_proxy',
-      upstreamName: body.upstreamName?.trim() ?? body.name?.trim() ?? existing.upstreamName,
-      upstreamBaseUrl: body.upstreamBaseUrl?.trim() ?? existing.upstreamBaseUrl,
-      upstreamUserId: body.upstreamUserId?.trim() ?? '',
-      keyName: body.keyName?.trim() ?? '',
-      skipLatencyDisable: false,
-      enabled: body.enabled ?? existing.enabled,
-      auth: body.auth ?? existing.auth,
-      status: body.enabled === false ? '已禁用' : '仅转发',
-      rechargeRatio: normalizeRechargeRatio(body.rechargeRatio),
-      priority: cpaPreferred ? 100 : normalizeInteger(body.priority, existing.priority),
-      weight: cpaPreferred ? 10 : normalizeInteger(body.weight, existing.weight),
-      sync: '不适用'
+      cpaPreferred,
+      fallbackPriority: existing.priority,
+      fallbackWeight: existing.weight
     });
-    if (managementKey) {
-      store.channelSecrets[channel.id] = { credential: managementKey };
-      channel.credentialConfigured = true;
-    }
-    store.cpaChannelOverrides[channel.id] = channel;
-    store.channels = dedupeChannels([channel, ...store.channels.filter((item) => item.id !== channel.id)], store.channelSecrets);
-    persistCpaStore(store);
-    appendEvent(store, channelEvent('配置渠道', channel));
-    syncRelayCounts(store);
 
-    return NextResponse.json({ channel, channels: await loadChannels(), events: store.events, relays: store.relays });
+    try {
+      const channel = await updateOrCreateBackendCpaChannel(body.id, channelInput);
+      delete store.cpaChannelOverrides[body.id];
+      delete store.channelSecrets[body.id];
+      persistCpaStore(store);
+      appendEvent(store, channelEvent('配置渠道', channel));
+      const channels = await loadChannels();
+
+      return NextResponse.json({ channel, channels, events: store.events, relays: store.relays });
+    } catch (error) {
+      return NextResponse.json({ error: errorMessage(error) }, { status: 502 });
+    }
   }
 
   if (existing?.upstreamType === 'cli_proxy') {
@@ -187,14 +180,15 @@ export async function DELETE(request: Request) {
   }
 
   if (existing?.upstreamType === 'cli_proxy') {
+    const localOverride = Boolean(store.cpaChannelOverrides[existing.id]);
     delete store.cpaChannelOverrides[existing.id];
     delete store.channelSecrets[existing.id];
     persistCpaStore(store);
 
-    if (!isLocalCpaChannelId(existing.id)) {
-      try {
-        await deleteBackendChannel(existing.id);
-      } catch (error) {
+    try {
+      await deleteBackendChannel(existing.id);
+    } catch (error) {
+      if (!localOverride) {
         return NextResponse.json({ error: `后端渠道删除失败：${errorMessage(error)}` }, { status: 502 });
       }
     }
@@ -230,6 +224,7 @@ export async function DELETE(request: Request) {
 }
 
 type ChannelPayload = {
+  id?: string;
   relayId?: string;
   name?: string;
   group?: string;
@@ -256,9 +251,104 @@ type ChannelPayload = {
 
 async function loadChannels() {
   const store = getStore();
-  const persistent = await listBackendChannels();
+  let persistent = await listBackendChannels();
+
+  if (await migrateLocalCpaChannels(store, persistent)) {
+    persistent = await listBackendChannels();
+  }
 
   return mergePersistentChannels(store, persistent);
+}
+
+async function migrateLocalCpaChannels(store: ReturnType<typeof getStore>, persistent: ChannelRecord[]) {
+  const persistentIds = new Set(persistent.map((channel) => channel.id));
+  let changed = false;
+
+  for (const channel of Object.values(store.cpaChannelOverrides ?? {})) {
+    if (channel.upstreamType !== 'cli_proxy' || persistentIds.has(channel.id)) {
+      continue;
+    }
+
+    try {
+      await createBackendChannel({
+        id: channel.id,
+        name: channel.name,
+        group: 'default',
+        mainStationGroup: 'default',
+        upstreamType: 'cli_proxy',
+        upstreamName: channel.upstreamName || channel.name,
+        upstreamBaseUrl: channel.upstreamBaseUrl,
+        upstreamUserId: '',
+        keyName: '',
+        skipLatencyDisable: false,
+        enabled: channel.enabled,
+        auth: channel.auth || '无鉴权',
+        credential: store.channelSecrets[channel.id]?.credential,
+        createMainStation: false,
+        rechargeRatio: channel.rechargeRatio,
+        priority: channel.priority,
+        weight: channel.weight
+      });
+      delete store.cpaChannelOverrides[channel.id];
+      delete store.channelSecrets[channel.id];
+      changed = true;
+    } catch {
+      // 后端不可用时保留旧本地 CPA 配置，避免页面配置丢失。
+    }
+  }
+
+  if (changed) {
+    persistCpaStore(store);
+  }
+
+  return changed;
+}
+
+async function updateOrCreateBackendCpaChannel(id: string, input: ChannelInput) {
+  try {
+    return await updateBackendChannel(id, input);
+  } catch (error) {
+    if (/not found|404|upstream not found/i.test(errorMessage(error))) {
+      return createBackendChannel({ ...input, id });
+    }
+
+    throw error;
+  }
+}
+
+function cpaBackendPayload(
+  body: ChannelPayload,
+  options: {
+    existing?: ChannelRecord;
+    relayId: string;
+    cpaPreferred: boolean;
+    fallbackPriority: number;
+    fallbackWeight: number;
+  }
+): ChannelInput {
+  const existing = options.existing;
+  const upstreamName = body.upstreamName?.trim() || body.name?.trim() || existing?.upstreamName || existing?.name || 'CPA 号池';
+  const managementKey = body.credential?.trim() || body.credentialPassword?.trim();
+
+  return {
+    id: body.id,
+    name: body.name?.trim() || existing?.name || upstreamName,
+    group: 'default',
+    mainStationGroup: 'default',
+    upstreamType: 'cli_proxy',
+    upstreamName,
+    upstreamBaseUrl: body.upstreamBaseUrl?.trim() || existing?.upstreamBaseUrl,
+    upstreamUserId: '',
+    keyName: '',
+    skipLatencyDisable: false,
+    enabled: body.enabled ?? existing?.enabled ?? true,
+    auth: body.auth ?? existing?.auth ?? '无鉴权',
+    credential: managementKey || undefined,
+    createMainStation: false,
+    rechargeRatio: normalizeRechargeRatio(body.rechargeRatio ?? existing?.rechargeRatio),
+    priority: options.cpaPreferred ? 100 : normalizeInteger(body.priority, options.fallbackPriority),
+    weight: options.cpaPreferred ? 10 : normalizeInteger(body.weight, options.fallbackWeight)
+  };
 }
 
 function validateChannelPayload(body: ChannelPayload, relayId?: string) {

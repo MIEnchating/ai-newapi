@@ -128,7 +128,7 @@ function channelAlertEvents(ruleMap: Map<string, AlertRule>, channels: ChannelRe
     if (syncRule && /同步失败|读取失败/.test(channel.status)) {
       events.push({
         title: `${channel.name} 同步失败`,
-        detail: channel.rateSource || channel.status,
+        detail: syncFailureDetail(channel),
         time: currentTime(),
         status: severityStatus(syncRule.severity)
       });
@@ -154,6 +154,19 @@ function channelAlertEvents(ruleMap: Map<string, AlertRule>, channels: ChannelRe
   }
 
   return events;
+}
+
+function syncFailureDetail(channel: ChannelRecord) {
+  const message = channel.lastError || channel.rateSource || channel.status;
+
+  if (/Unsupported state|authenticate data|credential payload|CREDENTIAL_SECRET/i.test(message)) {
+    return '认证信息无法解密，请重新保存该渠道密钥';
+  }
+  if (/Sub2API|email|username|password|用户.*token|用户.*Token/i.test(message)) {
+    return 'Sub2API 用户模式缺少账号密码或用户 Token';
+  }
+
+  return message.replace(/\s+/g, ' ').slice(0, 120);
 }
 
 function enabledRule(ruleMap: Map<string, AlertRule>, type: string) {

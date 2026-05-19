@@ -139,6 +139,11 @@ export class UpstreamsController {
     return this.upstreams.rates(id);
   }
 
+  @Get(':id/cpa-pool')
+  cpaPool(@Param('id') id: string) {
+    return this.upstreams.cpaPool(id);
+  }
+
   @Delete(':id')
   remove(@Param('id') id: string) {
     return this.upstreams.remove(id);

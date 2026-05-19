@@ -346,6 +346,89 @@ select {
   width: 118px;
 }
 
+.inspection-rule-grid {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.inspection-rule-grid-wide {
+  gap: 12px;
+}
+
+.inspection-rule-control {
+  display: grid;
+  min-width: 116px;
+  gap: 4px;
+}
+
+.inspection-rule-control-body {
+  display: flex;
+  min-height: 32px;
+  min-width: 0;
+  align-items: center;
+}
+
+.inspection-rule-label {
+  font-size: 12px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.inspection-segmented.ant-segmented {
+  border: 1px solid #cbd5e1;
+  background: #eef2f7;
+}
+
+.inspection-segmented .ant-segmented-item {
+  color: #475569;
+  font-weight: 500;
+}
+
+.inspection-segmented .ant-segmented-item-selected {
+  color: #0f766e;
+  background: #ffffff;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.16);
+}
+
+.inspection-segmented .ant-segmented-thumb {
+  background: #ffffff;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.16);
+}
+
+.inspection-segmented.ant-segmented-disabled {
+  opacity: 0.72;
+}
+
+.inspection-rule-control .ant-switch {
+  background: #94a3b8;
+}
+
+.inspection-rule-control .ant-switch.ant-switch-checked {
+  background: #0f766e;
+}
+
+.inspection-rule-control .ant-switch .ant-switch-inner {
+  font-weight: 600;
+}
+
+.inspection-rule-number {
+  width: 122px;
+}
+
+.inspection-rule-number .compact-number-input {
+  flex: 0 0 76px;
+  width: 76px !important;
+  min-width: 76px;
+}
+
+.inspection-rule-number .number-affix {
+  flex-basis: 46px;
+  width: 46px !important;
+}
+
 .alert-number {
   width: 154px;
 }
@@ -433,45 +516,75 @@ select {
   align-items: center;
 }
 
-.cpa-pool-summary {
-  display: grid;
-  grid-template-columns: minmax(220px, 1fr) repeat(3, minmax(84px, auto)) auto auto;
-  align-items: center;
-  gap: 12px;
-  padding: 12px;
-  border: 1px solid #e5e8ef;
-  border-radius: 8px;
-  background: #f8fafc;
-}
-
-.cpa-pool-summary .ant-statistic-title {
-  margin-bottom: 2px;
-  color: #667085;
-  font-size: 12px;
-}
-
-.cpa-pool-summary .ant-statistic-content {
-  font-size: 18px;
-}
-
-.cpa-pool-endpoint {
-  min-width: 0;
-}
-
 .cpa-account-cell .ant-tag {
   margin-inline-end: 0;
 }
 
+.cpa-metric-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 1.5fr) repeat(4, minmax(118px, 1fr));
+  gap: 10px;
+}
+
+.cpa-endpoint-panel,
+.cpa-metric {
+  display: grid;
+  align-content: center;
+  min-width: 0;
+  min-height: 72px;
+  padding: 10px 12px;
+  border: 1px solid #e5e8ef;
+  border-radius: 8px;
+  background: #fbfcfd;
+}
+
+.cpa-endpoint-panel {
+  gap: 3px;
+  border-left: 4px solid #0f766e;
+  background: #f7fbfa;
+}
+
+.cpa-metric-label {
+  font-size: 12px;
+}
+
+.cpa-metric-value {
+  color: #182230;
+  font-size: 22px;
+  line-height: 1.2;
+}
+
+.cpa-metric-ok .cpa-metric-value {
+  color: #0f766e;
+}
+
+.cpa-metric-error .cpa-metric-value {
+  color: #b42318;
+}
+
+.cpa-metric-muted .cpa-metric-value {
+  color: #667085;
+}
+
 .usage-percent {
-  width: 112px;
+  width: 132px;
 }
 
 .usage-percent .ant-progress-line {
   margin: 0;
 }
 
+.usage-percent-row {
+  min-height: 20px;
+  white-space: nowrap;
+}
+
+.usage-empty {
+  font-size: 12px;
+}
+
 @media (max-width: 980px) {
-  .cpa-pool-summary {
+  .cpa-metric-grid {
     grid-template-columns: 1fr 1fr;
   }
 }
@@ -922,7 +1035,9 @@ select {
   .inspection-interval,
   .inspection-action-select,
   .inspection-field,
-  .inspection-retest {
+  .inspection-retest,
+  .inspection-rule-control,
+  .inspection-rule-number {
     width: 100%;
   }
 

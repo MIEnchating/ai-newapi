@@ -13,7 +13,10 @@ type InspectionSettingState = {
   latencyTimeoutMs: number;
   latencyDisableThresholdMs: number;
   latencyFailureLimit: number;
+  latencyAutoDisableEnabled: boolean;
   disabledRetestMs: number;
+  priorityUpdateEnabled: boolean;
+  priorityStrategy: PriorityStrategy;
   balanceLowAction: InspectionRuleAction;
   rateIncreaseAction: InspectionRuleAction;
   ruleActionPriority: number;
@@ -21,6 +24,7 @@ type InspectionSettingState = {
 };
 
 type InspectionRuleAction = 'NONE' | 'LOWER' | 'DISABLE';
+type PriorityStrategy = 'RATE_FIRST' | 'BALANCED';
 
 type UpstreamLatencyState = {
   status: UpstreamStatus;
@@ -83,6 +87,17 @@ export async function syncUpstream(upstreamId: string) {
 
   if (!upstreamRecord) {
     throw new Error(`upstream not found: ${upstreamId}`);
+  }
+
+  if (upstreamRecord.type === UpstreamType.CLI_PROXY) {
+    await prisma.upstream.update({
+      where: { id: upstreamId },
+      data: {
+        lastError: null,
+        lastSyncAt: new Date()
+      }
+    });
+    return;
   }
 
   const upstream = {
@@ -158,7 +173,8 @@ export async function syncUpstream(upstreamId: string) {
       }
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'unknown sync error';
+    const rawMessage = errorMessage(error);
+    const message = clip(rawMessage, 1000);
     const challenge = /cloudflare|challenge|captcha|turnstile/i.test(message);
     const latencyData = latencyDataFromFailedSync(upstream, setting, latencyProbe, message);
     const persistedLatencyData = applyMainStationWriteResult(
@@ -200,12 +216,16 @@ async function loadInspectionSetting() {
     update: {}
   });
   const [extras] = await prisma.$queryRaw<Array<{
+    latencyAutoDisableEnabled: boolean | number | null;
+    priorityUpdateEnabled: boolean | number | null;
+    priorityStrategy: string | null;
     balanceLowAction: string | null;
     rateIncreaseAction: string | null;
     ruleActionPriority: number | null;
     ruleActionWeight: number | null;
   }>>`
-    SELECT balanceLowAction, rateIncreaseAction, ruleActionPriority, ruleActionWeight
+    SELECT latencyAutoDisableEnabled, priorityUpdateEnabled, priorityStrategy,
+           balanceLowAction, rateIncreaseAction, ruleActionPriority, ruleActionWeight
     FROM InspectionSetting
     WHERE id = ${settingId}
     LIMIT 1
@@ -213,6 +233,9 @@ async function loadInspectionSetting() {
 
   return {
     ...setting,
+    latencyAutoDisableEnabled: normalizeBoolean(extras?.latencyAutoDisableEnabled, true),
+    priorityUpdateEnabled: normalizeBoolean(extras?.priorityUpdateEnabled, true),
+    priorityStrategy: normalizePriorityStrategy(extras?.priorityStrategy),
     balanceLowAction: normalizeRuleAction(extras?.balanceLowAction),
     rateIncreaseAction: normalizeRuleAction(extras?.rateIncreaseAction),
     ruleActionPriority: clampInteger(numeric(extras?.ruleActionPriority) ?? 10, 0, 100),
@@ -398,14 +421,14 @@ function latencySuccessData(
   const groupRatio = currentGroupRatio(rates, upstream.groupName);
   const threshold = normalizeLatencyThreshold(setting.latencyDisableThresholdMs);
   const tooSlow = latencyMs > threshold;
-  const shouldDisable = tooSlow && !upstream.skipLatencyDisable;
+  const shouldDisable = tooSlow && shouldAutoDisable(upstream, setting);
   const dispatch = tooSlow
-    ? upstream.skipLatencyDisable
-      ? adjustedDispatch(groupRatio, latencyMs, upstream.rechargeRatio)
-      : { priority: 0, weight: 0 }
-    : adjustedDispatch(groupRatio, latencyMs, upstream.rechargeRatio);
+    ? shouldDisable
+      ? zeroDispatch(setting)
+      : adjustedDispatchForSetting(setting, groupRatio, latencyMs, upstream.rechargeRatio)
+    : adjustedDispatchForSetting(setting, groupRatio, latencyMs, upstream.rechargeRatio);
   const latencyLastError = tooSlow
-    ? `延迟 ${latencyMs}ms 超过阈值 ${threshold}ms${upstream.skipLatencyDisable ? '，已跳过自动禁用' : ''}`
+    ? `延迟 ${latencyMs}ms 超过阈值 ${threshold}ms${latencyDisableSkipMessage(upstream, setting)}`
     : null;
 
   return {
@@ -443,17 +466,17 @@ function latencyPassedData(
   const now = new Date();
   const threshold = normalizeLatencyThreshold(setting.latencyDisableThresholdMs);
   const tooSlow = latencyMs > threshold;
-  const shouldDisable = tooSlow && !upstream.skipLatencyDisable;
+  const shouldDisable = tooSlow && shouldAutoDisable(upstream, setting);
   const latencyLastError = tooSlow
-    ? `延迟 ${latencyMs}ms 超过阈值 ${threshold}ms${upstream.skipLatencyDisable ? '，已跳过自动禁用' : ''}`
+    ? `延迟 ${latencyMs}ms 超过阈值 ${threshold}ms${latencyDisableSkipMessage(upstream, setting)}`
     : null;
 
   return {
     ...(tooSlow
-      ? upstream.skipLatencyDisable
-        ? adjustedDispatch(null, latencyMs, upstream.rechargeRatio)
-        : { priority: 0, weight: 0 }
-      : adjustedDispatch(null, latencyMs, upstream.rechargeRatio)),
+      ? shouldDisable
+        ? zeroDispatch(setting)
+        : adjustedDispatchForSetting(setting, null, latencyMs, upstream.rechargeRatio)
+      : adjustedDispatchForSetting(setting, null, latencyMs, upstream.rechargeRatio)),
     status: shouldDisable ? UpstreamStatus.DISABLED : undefined,
     latencyMs,
     latencyCheckedAt: now,
@@ -485,16 +508,16 @@ function latencyFailureData(
   const now = new Date();
   const failureCount = upstream.latencyFailureCount + 1;
   const reachedFailureLimit = failureCount >= normalizeFailureLimit(setting.latencyFailureLimit);
-  const shouldDisable = reachedFailureLimit && !upstream.skipLatencyDisable;
+  const shouldDisable = reachedFailureLimit && shouldAutoDisable(upstream, setting);
   const nextInterval = shouldDisable
     ? normalizeInterval(setting.disabledRetestMs)
     : normalizeInterval(setting.latencyIntervalMs);
-  const latencyLastError = reachedFailureLimit && upstream.skipLatencyDisable
-    ? `${message}，已跳过自动禁用`
+  const latencyLastError = reachedFailureLimit && !shouldDisable
+    ? `${message}${latencyDisableSkipMessage(upstream, setting)}`
     : message;
 
   return {
-    ...(shouldDisable ? { priority: 0, weight: 0 } : {}),
+    ...(shouldDisable ? zeroDispatch(setting) : {}),
     status: shouldDisable
       ? UpstreamStatus.DISABLED
       : stateStatus && upstream.skipLatencyDisable
@@ -760,8 +783,8 @@ function numeric(value: unknown) {
   return null;
 }
 
-function clip(text: string) {
-  return text.replace(/\s+/g, ' ').slice(0, 180);
+function clip(text: string, maxLength = 180) {
+  return text.replace(/\s+/g, ' ').slice(0, maxLength);
 }
 
 function errorMessage(error: unknown) {
@@ -802,8 +825,7 @@ async function ruleActionData(
 ): Promise<LatencyUpdateData> {
   const [balanceRule, rateIncreaseRule] = await prisma.alertRule.findMany({
     where: {
-      type: { in: [AlertRuleType.BALANCE_LOW, AlertRuleType.RATE_INCREASE] },
-      enabled: true
+      type: { in: [AlertRuleType.BALANCE_LOW, AlertRuleType.RATE_INCREASE] }
     }
   }).then((rules) => [
     rules.find((rule) => rule.type === AlertRuleType.BALANCE_LOW),
@@ -840,14 +862,19 @@ async function ruleActionData(
   if (actions.includes('DISABLE')) {
     return {
       status: UpstreamStatus.DISABLED,
-      priority: 0,
-      weight: 0,
+      ...zeroDispatch(setting),
       disabledByLatency: false,
       latencyLastError: `巡检规则：${messages.join('；')}`
     };
   }
 
   if (actions.includes('LOWER')) {
+    if (!setting.priorityUpdateEnabled) {
+      return {
+        latencyLastError: `巡检规则：${messages.join('；')}，已跳过优先级回写`
+      };
+    }
+
     return {
       priority: Math.min(upstream.priority, setting.ruleActionPriority),
       weight: Math.min(upstream.weight, setting.ruleActionWeight),
@@ -858,12 +885,42 @@ async function ruleActionData(
   return {};
 }
 
-function adjustedDispatch(groupRatio: number | null, latencyMs: number, rechargeRatio: unknown) {
+function shouldAutoDisable(upstream: { skipLatencyDisable: boolean }, setting: InspectionSettingState) {
+  return setting.latencyAutoDisableEnabled && !upstream.skipLatencyDisable;
+}
+
+function latencyDisableSkipMessage(upstream: { skipLatencyDisable: boolean }, setting: InspectionSettingState) {
+  if (upstream.skipLatencyDisable) {
+    return '，已按渠道配置跳过自动禁用';
+  }
+  if (!setting.latencyAutoDisableEnabled) {
+    return '，已按巡检配置跳过自动禁用';
+  }
+
+  return '';
+}
+
+function zeroDispatch(setting: InspectionSettingState) {
+  return setting.priorityUpdateEnabled ? { priority: 0, weight: 0 } : {};
+}
+
+function adjustedDispatchForSetting(
+  setting: InspectionSettingState,
+  groupRatio: number | null,
+  latencyMs: number,
+  rechargeRatio: unknown
+) {
+  return setting.priorityUpdateEnabled ? adjustedDispatch(groupRatio, latencyMs, rechargeRatio, setting.priorityStrategy) : {};
+}
+
+function adjustedDispatch(groupRatio: number | null, latencyMs: number, rechargeRatio: unknown, strategy: PriorityStrategy) {
   const effectiveRatio = normalizePositive(groupRatio) ?? 1;
   const recharge = Math.max(0.01, normalizePositive(rechargeRatio) ?? 1);
-  const ratioScore = 100 / (effectiveRatio * recharge);
-  const latencyPenalty = Math.min(30, Math.floor(latencyMs / 1000) * 3);
-  const priority = clampInteger(Math.round(ratioScore - latencyPenalty), 1, 100);
+  const ratioScore = clampInteger(Math.round(100 / (effectiveRatio * recharge)), 1, 100);
+  const latencyScore = clampInteger(Math.round(100 - latencyMs / 200), 1, 100);
+  const priority = strategy === 'BALANCED'
+    ? clampInteger(Math.round(ratioScore * 0.65 + latencyScore * 0.35), 1, 100)
+    : clampInteger(Math.round(ratioScore - Math.min(15, Math.floor(latencyMs / 1000) * 2)), 1, 100);
   const weight = clampInteger(Math.round(priority / 10), 1, 10);
 
   return { priority, weight };
@@ -888,8 +945,28 @@ function normalizeRuleAction(value: unknown): InspectionRuleAction {
   return action === 'LOWER' || action === 'DISABLE' ? action : 'NONE';
 }
 
+function normalizePriorityStrategy(value: unknown): PriorityStrategy {
+  const strategy = typeof value === 'string' ? value.trim().toUpperCase() : 'RATE_FIRST';
+
+  return strategy === 'BALANCED' ? 'BALANCED' : 'RATE_FIRST';
+}
+
+function normalizeBoolean(value: unknown, fallback: boolean) {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  if (typeof value === 'number') {
+    return value === 1;
+  }
+
+  return fallback;
+}
+
 async function ensureInspectionSchema() {
   const statements = [
+    'ALTER TABLE InspectionSetting ADD COLUMN latencyAutoDisableEnabled BOOLEAN NOT NULL DEFAULT true',
+    'ALTER TABLE InspectionSetting ADD COLUMN priorityUpdateEnabled BOOLEAN NOT NULL DEFAULT true',
+    'ALTER TABLE InspectionSetting ADD COLUMN priorityStrategy VARCHAR(24) NOT NULL DEFAULT "RATE_FIRST"',
     'ALTER TABLE InspectionSetting ADD COLUMN balanceLowAction VARCHAR(16) NOT NULL DEFAULT "NONE"',
     'ALTER TABLE InspectionSetting ADD COLUMN rateIncreaseAction VARCHAR(16) NOT NULL DEFAULT "NONE"',
     'ALTER TABLE InspectionSetting ADD COLUMN ruleActionPriority INT NOT NULL DEFAULT 10',
@@ -908,11 +985,20 @@ async function ensureInspectionSchema() {
 }
 
 async function ensureUpstreamLatencySchema() {
-  try {
-    await prisma.$executeRawUnsafe('ALTER TABLE Upstream ADD COLUMN skipLatencyDisable BOOLEAN NOT NULL DEFAULT false');
-  } catch (error) {
-    if (!/Duplicate column|1060/i.test(errorMessage(error))) {
-      throw error;
+  const statements = [
+    "ALTER TABLE Upstream MODIFY COLUMN type ENUM('NEWAPI','SUB2API','CLI_PROXY') NOT NULL",
+    'ALTER TABLE Upstream MODIFY COLUMN lastError TEXT NULL',
+    'ALTER TABLE Upstream MODIFY COLUMN latencyLastError TEXT NULL',
+    'ALTER TABLE Upstream ADD COLUMN skipLatencyDisable BOOLEAN NOT NULL DEFAULT false'
+  ];
+
+  for (const statement of statements) {
+    try {
+      await prisma.$executeRawUnsafe(statement);
+    } catch (error) {
+      if (!/Duplicate column|1060/i.test(errorMessage(error))) {
+        throw error;
+      }
     }
   }
 }

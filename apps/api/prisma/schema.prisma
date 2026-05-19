@@ -10,6 +10,7 @@ datasource db {
 enum UpstreamType {
   NEWAPI
   SUB2API
+  CLI_PROXY
 }
 
 enum AuthMode {
@@ -76,14 +77,14 @@ model Upstream {
   latencyCheckedAt     DateTime?
   latencyFailureCount  Int               @default(0)
   latencySuccessCount  Int               @default(0)
-  latencyLastError     String?
+  latencyLastError     String?           @db.Text
   disabledByLatency    Boolean           @default(false)
   skipLatencyDisable   Boolean           @default(false)
   latencyDisabledAt    DateTime?
   latencyNextCheckAt   DateTime?
   credential           Credential?
   lastSyncAt           DateTime?
-  lastError            String?
+  lastError            String?           @db.Text
   createdAt            DateTime          @default(now())
   updatedAt            DateTime          @updatedAt
   rateSnapshots        RateSnapshot[]
@@ -96,7 +97,7 @@ model Upstream {
 model Credential {
   id               String   @id @default(cuid())
   upstreamId       String   @unique
-  encryptedPayload String
+  encryptedPayload String   @db.Text
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
   upstream         Upstream @relation(fields: [upstreamId], references: [id], onDelete: Cascade)
@@ -151,7 +152,10 @@ model InspectionSetting {
   latencyTimeoutMs          Int       @default(10000)
   latencyDisableThresholdMs Int       @default(8000)
   latencyFailureLimit       Int       @default(3)
+  latencyAutoDisableEnabled Boolean   @default(true)
   disabledRetestMs          Int       @default(1800000)
+  priorityUpdateEnabled     Boolean   @default(true)
+  priorityStrategy          String    @default("RATE_FIRST")
   cpaPreferred              Boolean   @default(false)
   inspectionConcurrency     Int       @default(3)
   balanceLowAction          String    @default("NONE")
@@ -160,8 +164,8 @@ model InspectionSetting {
   ruleActionWeight          Int       @default(0)
   lastRunAt                 DateTime?
   lastQueuedAt              DateTime?
-  lastResult                String?
-  lastError                 String?
+  lastResult                String?   @db.Text
+  lastError                 String?   @db.Text
   createdAt                 DateTime  @default(now())
   updatedAt                 DateTime  @updatedAt
 }
@@ -188,9 +192,9 @@ model MainStation {
   baseUrl             String    @default("")
   auth                String    @default("管理 Token")
   adminUserId         String    @default("")
-  encryptedAdminToken String?
+  encryptedAdminToken String?   @db.Text
   lastSyncAt          DateTime?
-  lastError           String?
+  lastError           String?   @db.Text
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
 }

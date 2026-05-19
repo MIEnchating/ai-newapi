@@ -7,6 +7,7 @@ import { SyncQueueService } from './sync-queue.service';
 const upstreamTypes = new Set(Object.values(UpstreamType));
 const authModes = new Set(Object.values(AuthMode));
 const upstreamStatuses = new Set(Object.values(UpstreamStatus));
+const cpaUsageRetentionMs = 7 * 24 * 60 * 60_000;
 const upstreamInclude = {
   credential: {
     select: {
@@ -90,9 +91,25 @@ type MainStationChannelPatch = {
   models?: string;
 };
 
+type CpaUsageMetric = {
+  percent: number | null;
+  used?: number | null;
+  limit?: number | null;
+  label?: string | null;
+};
+
+type CpaUsageRecord = {
+  timestamp: string;
+  authIndex?: string;
+  source?: string;
+  totalTokens: number;
+  failed: boolean;
+};
+
 @Injectable()
 export class UpstreamsService {
   private schemaChecked = false;
+  private readonly cpaUsageRecords = new Map<string, CpaUsageRecord[]>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -121,6 +138,10 @@ export class UpstreamsService {
 
     if (!name || !baseUrl) {
       throw new BadRequestException('name and baseUrl are required');
+    }
+
+    if (type === UpstreamType.CLI_PROXY && input.createMainStation) {
+      throw new BadRequestException('CPA 号池不写入主站渠道，只保存到本地数据库');
     }
 
     if (!id && input.createMainStation) {
@@ -199,6 +220,10 @@ export class UpstreamsService {
     await this.setRechargeRatio(upstream.id, normalizeRechargeRatio(input.rechargeRatio, 1));
     await this.setSkipLatencyDisable(upstream.id, input.skipLatencyDisable === true);
 
+    if (type === UpstreamType.CLI_PROXY) {
+      return this.findIncluded(upstream.id);
+    }
+
     return encryptedPayload ? this.applyGroupCredential(upstream, encryptedPayload) : this.inheritGroupCredential(upstream);
   }
 
@@ -221,6 +246,7 @@ export class UpstreamsService {
     }
 
     const data: Prisma.UpstreamUpdateInput = {};
+    const nextType = input.type !== undefined ? parseUpstreamType(input.type) : existing.type;
     if (input.name !== undefined) {
       const name = input.name.trim();
       if (!name) {
@@ -229,7 +255,7 @@ export class UpstreamsService {
       data.name = name;
     }
     if (input.type !== undefined) {
-      data.type = parseUpstreamType(input.type);
+      data.type = nextType;
     }
     if (input.baseUrl !== undefined) {
       const baseUrl = input.baseUrl.trim();
@@ -294,10 +320,12 @@ export class UpstreamsService {
       data.latencyDisabledAt = null;
     }
 
-    await this.updateMainStationChannelIfNeeded(
-      existing,
-      shouldRecoverLatencyDisabled && inputStatus === undefined ? { ...input, status: UpstreamStatus.LIMITED } : input
-    );
+    if (existing.type !== UpstreamType.CLI_PROXY && nextType !== UpstreamType.CLI_PROXY) {
+      await this.updateMainStationChannelIfNeeded(
+        existing,
+        shouldRecoverLatencyDisabled && inputStatus === undefined ? { ...input, status: UpstreamStatus.LIMITED } : input
+      );
+    }
 
     const upstream = await this.prisma.upstream.update({
       where: { id },
@@ -315,6 +343,10 @@ export class UpstreamsService {
       await this.syncGroupRechargeRatio(upstream, normalizeRechargeRatio(input.rechargeRatio, existing.rechargeRatio));
     }
 
+    if (nextType === UpstreamType.CLI_PROXY) {
+      return this.findIncluded(upstream.id);
+    }
+
     if (input.clearCredential) {
       return this.clearGroupCredential(upstream);
     }
@@ -327,6 +359,10 @@ export class UpstreamsService {
 
     if (!upstream) {
       throw new BadRequestException('upstream not found');
+    }
+
+    if (upstream.type === UpstreamType.CLI_PROXY) {
+      throw new BadRequestException('CPA 号池不参与自动巡检同步');
     }
 
     const job = await this.syncQueue.enqueue(id);
@@ -361,6 +397,13 @@ export class UpstreamsService {
         : {};
 
     try {
+      if (type === UpstreamType.CLI_PROXY) {
+        return {
+          ok: true,
+          status: credential.managementKey || credential.token ? 'ok' : 'limited',
+          message: credential.managementKey || credential.token ? 'CPA 管理密钥已配置' : 'CPA 管理密钥未配置'
+        };
+      }
       if (type === UpstreamType.SUB2API) {
         return await testSub2ApiCredential(baseUrl, authMode, credential, upstream.groupName);
       }
@@ -388,6 +431,13 @@ export class UpstreamsService {
     }
 
     try {
+      if (type === UpstreamType.CLI_PROXY) {
+        return {
+          ok: true,
+          status: credential.managementKey || credential.token ? 'ok' : 'limited',
+          message: credential.managementKey || credential.token ? 'CPA 管理密钥已填写' : 'CPA 管理密钥未填写'
+        };
+      }
       if (type === UpstreamType.SUB2API) {
         return await testSub2ApiCredential(baseUrl, authMode, credential, groupName);
       }
@@ -424,6 +474,10 @@ export class UpstreamsService {
         ? decryptCredentialPayload(upstream.credential.encryptedPayload)
         : {};
 
+    if (type === UpstreamType.CLI_PROXY) {
+      return { groups: [] };
+    }
+
     if (type === UpstreamType.SUB2API) {
       return { groups: await listSub2ApiGroups(baseUrl, authMode, credential) };
     }
@@ -442,6 +496,10 @@ export class UpstreamsService {
       throw new BadRequestException('type, baseUrl and authMode are required');
     }
 
+    if (type === UpstreamType.CLI_PROXY) {
+      return { groups: [] };
+    }
+
     if (type === UpstreamType.SUB2API) {
       return { groups: await listSub2ApiGroups(baseUrl, authMode, credential) };
     }
@@ -455,6 +513,68 @@ export class UpstreamsService {
       orderBy: { capturedAt: 'desc' },
       take: 200
     });
+  }
+
+  async cpaPool(id: string) {
+    await this.ensureSchema();
+
+    const upstream = await this.prisma.upstream.findUnique({
+      where: { id },
+      include: { credential: true }
+    });
+
+    if (!upstream) {
+      throw new BadRequestException('upstream not found');
+    }
+    if (upstream.type !== UpstreamType.CLI_PROXY) {
+      throw new BadRequestException('只有 CPA 号池渠道可以读取号池账号');
+    }
+
+    const credential = upstream.credential ? decryptCredentialPayload(upstream.credential.encryptedPayload) : {};
+    const managementKey = cpaManagementKey(credential);
+
+    if (!managementKey) {
+      throw new BadRequestException('CPA 号池缺少管理密钥，请在渠道配置里填写 CPA 管理密钥');
+    }
+
+    const baseUrl = normalizeBaseUrl(upstream.baseUrl);
+    const now = new Date();
+    const [authFilesResult, usageResult] = await Promise.allSettled([
+      cpaJson<unknown>(baseUrl, '/v0/management/auth-files', managementKey),
+      cpaJson<unknown>(baseUrl, '/v0/management/usage-queue?count=500', managementKey)
+    ]);
+
+    if (authFilesResult.status === 'rejected') {
+      throw new BadRequestException(errorMessage(authFilesResult.reason));
+    }
+
+    const usageRecords = parseCpaUsageRecords(unwrapData(usageResult.status === 'fulfilled' ? usageResult.value : undefined));
+    const cutoff = now.getTime() - cpaUsageRetentionMs;
+    const retained = [...(this.cpaUsageRecords.get(id) ?? []), ...usageRecords]
+      .filter((record) => Date.parse(record.timestamp) >= cutoff)
+      .slice(-20_000);
+    this.cpaUsageRecords.set(id, retained);
+
+    const accounts = parseCpaAuthFiles(unwrapData(authFilesResult.value)).map((account, index) => {
+      const usage = aggregateCpaUsage(retained, account, index);
+
+      return {
+        ...account,
+        successCount: account.successCount || usage.successCount,
+        failureCount: account.failureCount || usage.failureCount
+      };
+    });
+
+    return {
+      channel: {
+        id: upstream.id,
+        name: upstream.name,
+        baseUrl: upstream.baseUrl
+      },
+      accounts,
+      usageQueueError: usageResult.status === 'rejected' ? errorMessage(usageResult.reason) : null,
+      refreshedAt: now.toISOString()
+    };
   }
 
   async remove(id: string) {
@@ -638,13 +758,17 @@ export class UpstreamsService {
     }
 
     for (const statement of [
+      "ALTER TABLE Upstream MODIFY COLUMN type ENUM('NEWAPI','SUB2API','CLI_PROXY') NOT NULL",
       'ALTER TABLE Upstream MODIFY COLUMN rechargeRatio DECIMAL(10,2) NOT NULL DEFAULT 1',
-      'ALTER TABLE Upstream ADD COLUMN skipLatencyDisable BOOLEAN NOT NULL DEFAULT false'
+      'ALTER TABLE Upstream MODIFY COLUMN lastError TEXT NULL',
+      'ALTER TABLE Upstream MODIFY COLUMN latencyLastError TEXT NULL',
+      'ALTER TABLE Upstream ADD COLUMN skipLatencyDisable BOOLEAN NOT NULL DEFAULT false',
+      'ALTER TABLE Credential MODIFY COLUMN encryptedPayload TEXT NOT NULL'
     ]) {
       try {
         await this.prisma.$executeRawUnsafe(statement);
       } catch (error) {
-        if (!/Unknown column|Duplicate column|1060|1061|already|syntax/i.test(errorMessage(error))) {
+        if (!/Unknown column|Duplicate column|doesn't exist|1060|1061|1146|already|syntax/i.test(errorMessage(error))) {
           throw error;
         }
       }
@@ -1418,6 +1542,349 @@ function findGroupInfo(groups: UpstreamGroupInfo[], groupName: string) {
   const normalized = normalizeName(groupName);
 
   return groups.find((group) => normalizeName(group.name) === normalized || normalizeName(group.id) === normalized);
+}
+
+async function cpaJson<T>(baseUrl: string, path: string, managementKey: string): Promise<T> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12_000);
+
+  try {
+    const response = await fetch(`${baseUrl}${path.startsWith('/') ? path : `/${path}`}`, {
+      headers: {
+        accept: 'application/json',
+        authorization: `Bearer ${stripBearer(managementKey)}`,
+        'x-management-key': stripBearer(managementKey)
+      },
+      signal: controller.signal
+    });
+    const text = await response.text();
+
+    if (/cloudflare|turnstile|captcha|challenge/i.test(text)) {
+      throw new Error('CPA 返回 Cloudflare/验证码页面');
+    }
+    if (!response.ok) {
+      throw new Error(`CPA 管理接口 HTTP ${response.status}: ${clip(text)}`);
+    }
+
+    return (text ? JSON.parse(text) : {}) as T;
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error('CPA 管理接口请求超时');
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function cpaManagementKey(payload: Record<string, string>) {
+  return payload.managementKey?.trim()
+    || payload.token?.trim()
+    || payload.adminToken?.trim()
+    || payload.bearerToken?.trim()
+    || payload.password?.trim()
+    || null;
+}
+
+function parseCpaAuthFiles(value: unknown) {
+  const records = arrayOfRecords(value);
+
+  return records.map((record, index) => ({
+    key: String(stringValue(record.auth_index) ?? stringValue(record.authIndex) ?? stringValue(record.id) ?? stringValue(record.key) ?? stringValue(record.name) ?? index),
+    index: stringValue(record.index) ?? stringValue(record.auth_index) ?? stringValue(record.authIndex) ?? String(index),
+    name: stringValue(record.name) ?? stringValue(record.label) ?? stringValue(record.filename) ?? stringValue(record.file) ?? `账号 ${index + 1}`,
+    account: stringValue(record.email) ?? stringValue(record.account) ?? stringValue(record.username) ?? '-',
+    provider: stringValue(record.provider) ?? stringValue(record.account_type) ?? stringValue(record.accountType) ?? stringValue(record.type) ?? '-',
+    status: cpaAccountStatus(record),
+    successCount: numeric(record.success) ?? numeric(record.success_count) ?? numeric(record.successCount) ?? 0,
+    failureCount: numeric(record.failed) ?? numeric(record.failure_count) ?? numeric(record.failedCount) ?? 0,
+    usage5h: cpaUsageMetric(
+      record.usage_5h,
+      record.usage5h,
+      record.usage_5_hours,
+      record.usage5Hours,
+      record.five_hour,
+      record.fiveHour,
+      record.five_hours,
+      record.fiveHours,
+      record.five_hour_usage,
+      record.fiveHourUsage,
+      record.five_hours_usage,
+      record.fiveHoursUsage,
+      record.five_hour_usage_percent,
+      record.fiveHourUsagePercent,
+      record.five_hour_limit_usage,
+      record.fiveHourLimitUsage,
+      record.five_hours_limit_usage,
+      record.fiveHoursLimitUsage,
+      record.limit_usage_5h,
+      record.limitUsage5h,
+      usageMetricFromPair(firstDefined(record.five_hour_used, record.fiveHourUsed, record.five_hours_used, record.fiveHoursUsed, record.usage_5h_used, record.usage5hUsed, record.used_5h, record.used5h), firstDefined(record.five_hour_limit, record.fiveHourLimit, record.five_hours_limit, record.fiveHoursLimit, record.usage_5h_limit, record.usage5hLimit, record.limit_5h, record.limit5h)),
+      usageMetricFromPair(firstDefined(record.five_hour_usage, record.fiveHourUsage, record.five_hours_usage, record.fiveHoursUsage), firstDefined(record.five_hour_limit, record.fiveHourLimit, record.five_hours_limit, record.fiveHoursLimit))
+    ),
+    usage7d: cpaUsageMetric(
+      record.usage_7d,
+      record.usage7d,
+      record.week,
+      record.weekly,
+      record.week_usage,
+      record.weekUsage,
+      record.weekly_usage,
+      record.weeklyUsage,
+      record.week_usage_percent,
+      record.weekUsagePercent,
+      record.weekly_usage_percent,
+      record.weeklyUsagePercent,
+      record.week_limit_usage,
+      record.weekLimitUsage,
+      record.weekly_limit_usage,
+      record.weeklyLimitUsage,
+      record.limit_usage_7d,
+      record.limitUsage7d,
+      usageMetricFromPair(firstDefined(record.week_used, record.weekUsed, record.weekly_used, record.weeklyUsed, record.usage_7d_used, record.usage7dUsed, record.used_7d, record.used7d), firstDefined(record.week_limit, record.weekLimit, record.weekly_limit, record.weeklyLimit, record.usage_7d_limit, record.usage7dLimit, record.limit_7d, record.limit7d)),
+      usageMetricFromPair(firstDefined(record.week_usage, record.weekUsage, record.weekly_usage, record.weeklyUsage), firstDefined(record.week_limit, record.weekLimit, record.weekly_limit, record.weeklyLimit))
+    ),
+    lastRefresh:
+      stringValue(record.last_refresh) ??
+      stringValue(record.lastRefresh) ??
+      stringValue(record.last_refreshed_at) ??
+      stringValue(record.lastRefreshedAt) ??
+      stringValue(record.quota_refresh_at) ??
+      stringValue(record.quotaRefreshAt) ??
+      stringValue(record.refresh_time) ??
+      stringValue(record.last_used) ??
+      null,
+    refreshTime: stringValue(record.modtime) ?? stringValue(record.mtime) ?? stringValue(record.updated_at) ?? null
+  }));
+}
+
+function parseCpaUsageRecords(value: unknown): CpaUsageRecord[] {
+  return arrayOfRecords(value).map((record) => ({
+    timestamp: stringValue(record.timestamp) ?? stringValue(record.time) ?? stringValue(record.created_at) ?? new Date().toISOString(),
+    authIndex: stringValue(record.auth_index) ?? stringValue(record.authIndex) ?? stringValue(record.index) ?? stringValue(record.file) ?? stringValue(record.name),
+    source: stringValue(record.source) ?? stringValue(record.model),
+    totalTokens:
+      numeric(record.total_tokens) ??
+      numeric(record.totalTokens) ??
+      numeric(record.tokens) ??
+      numeric(recordValue(record.tokens)?.total_tokens) ??
+      numeric(recordValue(record.tokens)?.totalTokens) ??
+      numeric(recordValue(record.usage)?.total_tokens) ??
+      numeric(recordValue(record.usage)?.totalTokens) ??
+      (numeric(record.prompt_tokens) ?? 0) + (numeric(record.completion_tokens) ?? 0),
+    failed: booleanValue(record.failed) === true || ['failed', 'error'].includes(stringValue(record.status)?.toLowerCase() ?? '')
+  })).filter((record) => Number.isFinite(Date.parse(record.timestamp)));
+}
+
+function aggregateCpaUsage(records: CpaUsageRecord[], account: { index: string; key: string; name: string }, index: number) {
+  const keys = new Set([account.index, account.key, account.name, String(index)]);
+  let successCount = 0;
+  let failureCount = 0;
+
+  for (const record of records) {
+    if (record.authIndex && !keys.has(record.authIndex)) {
+      continue;
+    }
+
+    if (record.failed) {
+      failureCount += 1;
+      continue;
+    }
+
+    successCount += 1;
+  }
+
+  return { successCount, failureCount };
+}
+
+function cpaAccountStatus(record: Record<string, unknown>) {
+  const disabled = booleanValue(record.disabled) === true || booleanValue(record.is_disabled) === true;
+  if (disabled) {
+    return '已禁用';
+  }
+
+  const unavailable = booleanValue(record.unavailable) === true || booleanValue(record.is_unavailable) === true;
+  if (unavailable) {
+    return '不可用';
+  }
+
+  const status = stringValue(record.status) ?? stringValue(record.state);
+  const statusMessage = stringValue(record.status_message) ?? stringValue(record.statusMessage);
+  const normalized = `${status ?? ''} ${statusMessage ?? ''}`.trim().toLowerCase();
+
+  if (!normalized) {
+    return '正常';
+  }
+  if (/ready|ok|normal|available|active|healthy|success|正常|可用/.test(normalized)) {
+    return '正常';
+  }
+  if (/refresh|loading|pending|wait|刷新|等待|处理中/.test(normalized)) {
+    return '刷新中';
+  }
+  if (/disable|disabled|inactive|paused|ban|blocked|locked|禁用|封禁|锁定/.test(normalized)) {
+    return '已禁用';
+  }
+  if (/unavailable|quota|limit|limited|受限|不可用|限额/.test(normalized)) {
+    return '不可用';
+  }
+  if (/error|failed|fail|invalid|expired|异常|失败|失效|过期/.test(normalized)) {
+    return '异常';
+  }
+
+  return status ?? statusMessage ?? '正常';
+}
+
+function arrayOfRecords(value: unknown): Array<Record<string, unknown>> {
+  const data = unwrapData(value);
+  const record = recordValue(data);
+  const candidates = [
+    data,
+    record?.files,
+    record?.items,
+    record?.list,
+    record?.records,
+    record?.auth_files,
+    record?.authFiles,
+    record?.data
+  ];
+
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) {
+      return candidate.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object' && !Array.isArray(item));
+    }
+  }
+
+  return [];
+}
+
+function cpaUsageMetric(...values: unknown[]): CpaUsageMetric | null {
+  for (const value of values) {
+    const metric = usageMetricFromValue(value);
+    if (metric) {
+      return metric;
+    }
+  }
+
+  return null;
+}
+
+function usageMetricFromValue(value: unknown): CpaUsageMetric | null {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+
+  const direct = numeric(value);
+  if (direct !== undefined) {
+    return { percent: normalizePercent(direct) };
+  }
+
+  if (typeof value === 'string') {
+    const text = value.trim();
+    const pair = /^([0-9]+(?:\.[0-9]+)?)\s*\/\s*([0-9]+(?:\.[0-9]+)?)/.exec(text);
+    if (pair) {
+      return usageMetricFromPair(Number(pair[1]), Number(pair[2]));
+    }
+    const percent = /^([0-9]+(?:\.[0-9]+)?)\s*%$/.exec(text);
+    if (percent) {
+      return { percent: normalizePercent(Number(percent[1])), label: text };
+    }
+  }
+
+  const record = recordValue(value);
+  if (!record) {
+    return null;
+  }
+
+  const nested = usageMetricFromValue(record.usage) ?? usageMetricFromValue(record.value);
+  if (nested?.used !== undefined || nested?.limit !== undefined) {
+    return nested;
+  }
+
+  const percent = firstNumeric(
+    record.percent,
+    record.percentage,
+    record.usage_percent,
+    record.usagePercent,
+    record.limit_percent,
+    record.limitPercent,
+    record.rate,
+    record.ratio
+  );
+  const paired = usageMetricFromPair(
+    firstDefined(record.used, record.current, record.count, record.usage, record.used_count, record.usedCount, record.consumed),
+    firstDefined(record.limit, record.max, record.maximum, record.quota, record.total, record.cap)
+  );
+
+  if (paired) {
+    return paired;
+  }
+  if (percent !== undefined) {
+    return { percent: normalizePercent(percent) };
+  }
+
+  return nested;
+}
+
+function usageMetricFromPair(usedValue: unknown, limitValue: unknown): CpaUsageMetric | null {
+  const used = numeric(usedValue);
+  const limit = numeric(limitValue);
+
+  if (used === undefined || limit === undefined || limit <= 0) {
+    return null;
+  }
+
+  const percent = normalizePercent((used / limit) * 100);
+
+  return {
+    percent,
+    used,
+    limit,
+    label: `${formatUsageNumber(used)} / ${formatUsageNumber(limit)}`
+  };
+}
+
+function firstDefined(...values: unknown[]) {
+  return values.find((value) => value !== undefined && value !== null && value !== '');
+}
+
+function firstNumeric(...values: unknown[]) {
+  for (const value of values) {
+    const parsed = numeric(value);
+    if (parsed !== undefined) {
+      return parsed;
+    }
+  }
+
+  return undefined;
+}
+
+function normalizePercent(value: number) {
+  const percent = value > 0 && value <= 1 ? value * 100 : value;
+  return Math.max(0, Math.min(100, Math.round(percent * 100) / 100));
+}
+
+function formatUsageNumber(value: number) {
+  return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+}
+
+function booleanValue(value: unknown) {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  if (typeof value === 'number') {
+    return value === 1;
+  }
+  if (typeof value === 'string') {
+    if (/^(true|1|yes|y)$/i.test(value.trim())) {
+      return true;
+    }
+    if (/^(false|0|no|n)$/i.test(value.trim())) {
+      return false;
+    }
+  }
+
+  return null;
 }
 
 async function requestJson<T>(

@@ -2,12 +2,9 @@ import { NextResponse } from 'next/server';
 import { createBackendChannel, listBackendChannels } from '../../backend-upstreams';
 import { requireAuth } from '../../auth/session';
 import {
-  dedupeChannels,
   getStore,
   mergePersistentChannels,
-  normalizeChannel,
   persistCpaStore,
-  syncRelayCounts,
   type ChannelRecord,
   type UpstreamProvider
 } from '../../store';
@@ -133,45 +130,22 @@ async function detectUpstreamType(upstreamBaseUrl: string) {
 }
 
 async function persistDetectedChannel(existing: ChannelRecord, upstreamType: UpstreamProvider) {
-  if (upstreamType === 'cli_proxy') {
-    const channel = normalizeChannel({
-      ...existing,
-      upstreamType,
-      enabled: existing.enabled,
-      auth: defaultAuth(upstreamType),
-      credentialConfigured: false,
-      balance: '-',
-      groupRatio: null,
-      currentRate: null,
-      previousRate: null,
-      rateSource: '不适用',
-      sync: '不适用'
-    });
-    const store = getStore();
-    store.cpaChannelOverrides[channel.id] = channel;
-    store.channels = dedupeChannels([channel, ...store.channels.filter((item) => item.id !== channel.id)], store.channelSecrets);
-    persistCpaStore(store);
-    syncRelayCounts(store);
-
-    return channel;
-  }
-
   const channel = await createBackendChannel({
     id: existing.id,
     name: existing.name,
-    group: existing.group,
+    group: upstreamType === 'cli_proxy' ? 'default' : existing.group,
     upstreamType,
     upstreamName: existing.upstreamName,
     upstreamBaseUrl: existing.upstreamBaseUrl,
     upstreamUserId: upstreamType === 'newapi' ? existing.upstreamUserId : '',
-    keyName: existing.keyName,
+    keyName: upstreamType === 'cli_proxy' ? '' : existing.keyName,
     enabled: existing.enabled,
     auth: defaultAuth(upstreamType),
     rechargeRatio: existing.rechargeRatio,
     priority: existing.priority,
     weight: existing.weight,
-    mainStationGroup: existing.mainStationGroup,
-    skipLatencyDisable: existing.skipLatencyDisable
+    mainStationGroup: upstreamType === 'cli_proxy' ? 'default' : existing.mainStationGroup,
+    skipLatencyDisable: upstreamType === 'cli_proxy' ? false : existing.skipLatencyDisable
   });
   const store = getStore();
   const persistent = await listBackendChannels();

@@ -39,9 +39,12 @@ type ImportedChannel = {
 
 @Injectable()
 export class MainStationService {
+  private schemaChecked = false;
+
   constructor(private readonly prisma: PrismaService) {}
 
   async get() {
+    await this.ensureSchema();
     const station = await this.prisma.mainStation.findUnique({
       where: { id: MAIN_STATION_ID }
     });
@@ -50,6 +53,7 @@ export class MainStationService {
   }
 
   async update(input: MainStationInput) {
+    await this.ensureSchema();
     const existing = await this.prisma.mainStation.findUnique({
       where: { id: MAIN_STATION_ID }
     });
@@ -95,6 +99,7 @@ export class MainStationService {
   }
 
   async syncChannels() {
+    await this.ensureSchema();
     const station = await this.prisma.mainStation.findUnique({
       where: { id: MAIN_STATION_ID }
     });
@@ -193,6 +198,7 @@ export class MainStationService {
   }
 
   async listGroups() {
+    await this.ensureSchema();
     const station = await this.requireConfiguredStation();
     const adminToken = decryptAdminToken(station.encryptedAdminToken as string);
     const [groupsResult, optionsResult] = await Promise.allSettled([
@@ -214,6 +220,7 @@ export class MainStationService {
   }
 
   async createGroup(input: MainStationGroupInput) {
+    await this.ensureSchema();
     const name = input.name?.trim();
     const ratio = normalizeRatio(input.ratio, 1);
 
@@ -262,6 +269,7 @@ export class MainStationService {
   }
 
   private async requireConfiguredStation() {
+    await this.ensureSchema();
     const station = await this.prisma.mainStation.findUnique({
       where: { id: MAIN_STATION_ID }
     });
@@ -271,6 +279,23 @@ export class MainStationService {
     }
 
     return station;
+  }
+
+  private async ensureSchema() {
+    if (this.schemaChecked) {
+      return;
+    }
+
+    try {
+      await this.prisma.$executeRawUnsafe('ALTER TABLE MainStation MODIFY COLUMN encryptedAdminToken TEXT NULL');
+      await this.prisma.$executeRawUnsafe('ALTER TABLE MainStation MODIFY COLUMN lastError TEXT NULL');
+    } catch (error) {
+      if (!/Unknown column|syntax/i.test(errorMessage(error))) {
+        throw error;
+      }
+    }
+
+    this.schemaChecked = true;
   }
 }
 
