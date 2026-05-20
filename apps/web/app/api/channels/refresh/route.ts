@@ -47,8 +47,8 @@ export async function POST(request: Request) {
     await syncBackendChannel(channelId);
     const channels = await listBackendChannels();
     const event: EventRecord = {
-      title: '单个渠道巡检已入队',
-      detail: `渠道 ${channelId} 已提交到后台 Worker`,
+      title: '单个渠道同步完成',
+      detail: `渠道 ${channelId} 已完成余额、倍率和延迟检查`,
       time: currentTime(),
       status: 'success'
     };

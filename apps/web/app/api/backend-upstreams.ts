@@ -38,7 +38,6 @@ export type CredentialTestResult = {
   balanceCurrency?: string;
   groupRatio?: number | null;
   rateSource?: string;
-  suggestedRechargeRatio?: number | null;
 };
 
 export type UpstreamGroupInfo = {
@@ -494,10 +493,11 @@ function toCredentialPayload(input: ChannelInput) {
 function toChannelRecord(upstream: BackendUpstream): ChannelRecord {
   const upstreamType = upstream.type.toLowerCase() as UpstreamProvider;
   const credentialConfigured = Boolean(upstream.credential);
-  const status = statusLabel(upstream.status, credentialConfigured, Boolean(upstream.disabledByLatency));
+  const status = statusLabel(upstream.status, credentialConfigured, Boolean(upstream.disabledByLatency), upstream.lastError);
   const groupRate = latestGroupRate(upstream);
   const nameParts = splitChannelName(upstream.name);
   const upstreamName = normalizePlatformGroupName(upstream.upstreamName, upstream.name, nameParts.platformGroupName);
+  const failureReason = failureReasonText(upstream.lastError);
 
   if (upstreamType === 'cli_proxy') {
     return {
@@ -562,7 +562,7 @@ function toChannelRecord(upstream: BackendUpstream): ChannelRecord {
     balance: balanceText(upstream, credentialConfigured),
     models: upstream._count?.rateSnapshots ?? 0,
     groupRatio: groupRate.current,
-    rateSource: groupRate.source ?? (upstream._count?.rateSnapshots ? '未找到当前上游分组倍率' : credentialConfigured ? '待同步' : '待配置认证信息'),
+    rateSource: failureReason ?? groupRate.source ?? (upstream._count?.rateSnapshots ? '未找到当前上游分组倍率' : credentialConfigured ? '待同步' : '待配置认证信息'),
     rechargeRatio: normalizeRechargeRatio(upstream.rechargeRatio, 1),
     currentRate: groupRate.current,
     previousRate: groupRate.previous,
@@ -763,7 +763,8 @@ function toRelayRecord(relay: BackendMainStation, channelCount: number): RelayRe
 function statusLabel(
   status: BackendUpstream['status'],
   credentialConfigured: boolean,
-  disabledByLatency = false
+  disabledByLatency = false,
+  lastError?: string | null
 ): { label: string; tone: StatusTone } {
   if (disabledByLatency) {
     return { label: '延迟禁用', tone: 'error' };
@@ -773,6 +774,10 @@ function statusLabel(
     return { label: '待配置认证信息', tone: 'limited' };
   }
 
+  if (lastError && isCredentialFailureMessage(lastError)) {
+    return { label: '凭证失效', tone: 'error' };
+  }
+
   if (status === 'OK') {
     return { label: '正常', tone: 'ok' };
   }
@@ -780,7 +785,7 @@ function statusLabel(
     return { label: '需要人工处理', tone: 'limited' };
   }
   if (status === 'EXPIRED') {
-    return { label: '认证信息过期', tone: 'error' };
+    return { label: '凭证失效', tone: 'error' };
   }
   if (status === 'ERROR') {
     return { label: '同步失败', tone: 'error' };
@@ -790,6 +795,23 @@ function statusLabel(
   }
 
   return { label: '待同步', tone: 'warn' };
+}
+
+function failureReasonText(message: string | null | undefined) {
+  const normalized = message?.replace(/\s+/g, ' ').trim();
+
+  if (!normalized) {
+    return null;
+  }
+  if (/Unsupported state|authenticate data|credential payload|CREDENTIAL_SECRET/i.test(normalized)) {
+    return '认证信息无法解密，请重新保存该渠道密钥';
+  }
+
+  return normalized.slice(0, 160);
+}
+
+function isCredentialFailureMessage(message: string) {
+  return /Unsupported state|authenticate data|credential payload|CREDENTIAL_SECRET|HTTP 401|HTTP 403|unauthorized|forbidden|invalid token|token.*invalid|expired|失效|过期|权限不足|认证失败|鉴权失败|登录失败|password|账号密码|用户模式需要|需要 email|需要 upstreamUserId/i.test(message);
 }
 
 function balanceText(upstream: BackendUpstream, credentialConfigured: boolean) {

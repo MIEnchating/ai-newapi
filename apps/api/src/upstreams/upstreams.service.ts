@@ -3,6 +3,7 @@ import { AuthMode, Prisma, UpstreamStatus, UpstreamType } from '@prisma/client';
 import { decryptCredentialPayload, encryptCredentialPayload } from '../vault/credential-vault';
 import { PrismaService } from '../prisma.service';
 import { SyncQueueService } from './sync-queue.service';
+import { syncUpstream } from '../../../worker/src/sync/sync-upstream';
 
 const upstreamTypes = new Set(Object.values(UpstreamType));
 const authModes = new Set(Object.values(AuthMode));
@@ -70,7 +71,6 @@ type CredentialTestResult = {
   balanceCurrency?: string;
   groupRatio?: number | null;
   rateSource?: string;
-  suggestedRechargeRatio?: number | null;
 };
 
 type UpstreamGroupInfo = {
@@ -365,11 +365,10 @@ export class UpstreamsService {
       throw new BadRequestException('CPA 号池不参与自动巡检同步');
     }
 
-    const job = await this.syncQueue.enqueue(id);
+    await syncUpstream(id);
 
     return {
-      queued: true,
-      jobId: job.id,
+      completed: true,
       upstreamId: id
     };
   }
@@ -1152,7 +1151,6 @@ async function testNewApiCredential(
   const statusPayload = await requestJson<unknown>(baseUrl, '/api/status').catch(() => null);
   const status = recordValue(unwrapData(statusPayload)) ?? {};
   const quotaPerUnit = numeric(status.quota_per_unit) ?? 500000;
-  const suggestedRechargeRatio = suggestRechargeRatio(quotaPerUnit);
 
   if (authMode === AuthMode.API_KEY) {
     const token = credential.adminToken ?? credential.token ?? credential.bearerToken;
@@ -1164,28 +1162,33 @@ async function testNewApiCredential(
     return {
       ok: true,
       status: 'limited',
-      message: 'API Key 可用，但 NewAPI API Key 通常不能读取余额和倍率',
-      suggestedRechargeRatio
+      message: 'API Key 可用，但 NewAPI API Key 通常不能读取余额和倍率'
     };
   }
 
   const auth = await newApiAuthContext(baseUrl, authMode, credential, upstreamUserId);
 
-  const [selfResult, pricingResult, optionsResult] = await Promise.allSettled([
+  const [selfResult, pricingResult, optionsResult, selfGroupsResult, userGroupsResult] = await Promise.allSettled([
     requestJson<unknown>(baseUrl, '/api/user/self', auth),
     requestJson<unknown>(baseUrl, '/api/pricing', auth),
-    requestJson<unknown>(baseUrl, '/api/option/', auth)
+    requestJson<unknown>(baseUrl, '/api/option/', auth),
+    requestJson<unknown>(baseUrl, '/api/user/self/groups', auth),
+    requestJson<unknown>(baseUrl, '/api/user/groups', auth)
   ]);
   const self = settledRecord(selfResult);
-  const pricing = settledRecord(pricingResult);
+  const pricingPayload = settledPayload(pricingResult);
+  const pricingData = unwrapData(pricingPayload);
+  const pricing = recordValue(pricingPayload) ?? recordValue(pricingData);
   const options = settledRecord(optionsResult);
+  const selfGroupRecords = groupRecordsFromResult(selfGroupsResult);
+  const userGroupRecords = groupRecordsFromResult(userGroupsResult);
   const quota = numeric(self?.quota);
   const balance = quota !== undefined ? quota / quotaPerUnit : numeric(self?.balance);
-  const groupRatioResult = parseNewApiGroupRatio(groupName, pricing, options);
-  const readable = self || pricing || options;
+  const groupRatioResult = parseNewApiGroupRatio(groupName, pricingPayload, options, selfGroupRecords, userGroupRecords);
+  const readable = self || pricing || options || selfGroupRecords.length > 0 || userGroupRecords.length > 0;
 
   if (!readable) {
-    throw settledError(selfResult) ?? settledError(pricingResult) ?? settledError(optionsResult) ?? new Error('凭证测试失败');
+    throw settledError(selfResult) ?? settledError(pricingResult) ?? settledError(optionsResult) ?? settledError(selfGroupsResult) ?? settledError(userGroupsResult) ?? new Error('凭证测试失败');
   }
 
   const complete = balance !== undefined && groupRatioResult.value !== null;
@@ -1199,8 +1202,7 @@ async function testNewApiCredential(
     balance,
     balanceCurrency: balance !== undefined ? 'CNY' : undefined,
     groupRatio: groupRatioResult.value,
-    rateSource: groupRatioResult.source,
-    suggestedRechargeRatio
+    rateSource: groupRatioResult.source
   };
 }
 
@@ -1223,13 +1225,17 @@ async function listNewApiGroups(
     requestJson<unknown>(baseUrl, '/api/groups', auth),
     requestJson<unknown>(baseUrl, '/api/user/groups', auth)
   ]);
-  const pricing = settledRecord(pricingResult);
+  const pricingPayload = settledPayload(pricingResult);
+  const pricingData = unwrapData(pricingPayload);
+  const pricing = recordValue(pricingPayload) ?? recordValue(pricingData);
   const options = settledRecord(optionsResult);
   const groupRatio = {
     ...parseJsonRecord(options?.GroupRatio ?? options?.group_ratio),
+    ...newApiGroupRatioFromPricing(pricingPayload),
     ...parseJsonRecord(pricing?.group_ratio ?? pricing?.GroupRatio)
   };
   const records = [
+    ...newApiGroupRecordsFromPricing(pricingPayload),
     ...groupRecordsFromResult(groupResult),
     ...groupRecordsFromResult(groupsResult),
     ...groupRecordsFromResult(userGroupsResult)
@@ -1321,8 +1327,7 @@ async function testSub2ApiCredential(
     return {
       ok: true,
       status: 'limited',
-      message: 'API Key 可用，但 Sub2API API Key 不能稳定读取余额、倍率和分组',
-      suggestedRechargeRatio: null
+      message: 'API Key 可用，但 Sub2API API Key 不能稳定读取余额、倍率和分组'
     };
   }
 
@@ -1355,8 +1360,7 @@ async function testSub2ApiCredential(
     balance,
     balanceCurrency: stringValue(user?.currency) ?? stringValue(user?.balance_currency) ?? (balance !== undefined ? 'CNY' : undefined),
     groupRatio,
-    rateSource: groupRatio !== null ? '/api/v1/groups/rates' : undefined,
-    suggestedRechargeRatio: null
+    rateSource: groupRatio !== null ? '/api/v1/groups/rates' : undefined
   };
 }
 
@@ -1417,10 +1421,30 @@ async function sub2ApiToken(baseUrl: string, authMode: AuthMode, credential: Rec
 
 function parseNewApiGroupRatio(
   groupName: string,
-  pricing: Record<string, unknown> | undefined,
-  options: Record<string, unknown> | undefined
+  pricingPayload: unknown,
+  options: Record<string, unknown> | undefined,
+  selfGroupRecords: Array<Record<string, unknown>> = [],
+  userGroupRecords: Array<Record<string, unknown>> = []
 ) {
-  const pricingGroupRatio = parseJsonRecord(pricing?.group_ratio ?? pricing?.GroupRatio);
+  const pricing = recordValue(pricingPayload) ?? recordValue(unwrapData(pricingPayload));
+  const pricingGroupRatio = newApiGroupRatioFromPricing(pricingPayload);
+  const selfGroups = mergeGroupInfos(selfGroupRecords, pricingGroupRatio, '/api/user/self/groups');
+  const matchedSelfGroup = findGroupInfo(selfGroups, groupName);
+  if (matchedSelfGroup?.ratio !== undefined && matchedSelfGroup.ratio !== null) {
+    return {
+      value: matchedSelfGroup.ratio,
+      source: matchedSelfGroup.source
+    };
+  }
+
+  const matchedUserGroup = findGroupInfo(mergeGroupInfos(userGroupRecords, pricingGroupRatio, '/api/user/groups'), groupName);
+  if (matchedUserGroup?.ratio !== undefined && matchedUserGroup.ratio !== null) {
+    return {
+      value: matchedUserGroup.ratio,
+      source: matchedUserGroup.source
+    };
+  }
+
   const optionGroupRatio = parseJsonRecord(options?.GroupRatio ?? options?.group_ratio);
   const merged = { ...optionGroupRatio, ...pricingGroupRatio };
   const source = Object.keys(pricingGroupRatio).length > 0 ? '/api/pricing' : Object.keys(optionGroupRatio).length > 0 ? '/api/option/' : undefined;
@@ -1456,6 +1480,117 @@ function groupRecordsFromResult(result: PromiseSettledResult<unknown>) {
   return groupRecordsFromPayload(unwrapData(result.value));
 }
 
+function settledPayload(result: PromiseSettledResult<unknown>) {
+  return result.status === 'fulfilled' ? result.value : undefined;
+}
+
+function newApiGroupRatioFromPricing(value: unknown): Record<string, unknown> {
+  const record = recordValue(value);
+  const data = recordValue(unwrapData(value));
+
+  return {
+    ...parseJsonRecord(record?.group_ratio ?? record?.GroupRatio),
+    ...parseJsonRecord(data?.group_ratio ?? data?.GroupRatio)
+  };
+}
+
+function newApiGroupRecordsFromPricing(value: unknown): Array<Record<string, unknown>> {
+  const groups = new Map<string, Record<string, unknown>>();
+  const pricingRecord = recordValue(value);
+  const groupRatio = newApiGroupRatioFromPricing(value);
+
+  for (const group of arrayOfStrings(pricingRecord?.usable_group ?? pricingRecord?.usableGroup)) {
+    groups.set(normalizeName(group), {
+      name: group,
+      ratio: ratioFromValue(groupRatio[group]),
+      source: '/api/pricing'
+    });
+  }
+
+  for (const [group, ratio] of Object.entries(groupRatio)) {
+    groups.set(normalizeName(group), {
+      ...groups.get(normalizeName(group)),
+      name: groups.get(normalizeName(group))?.name ?? group,
+      ratio: ratioFromValue(ratio),
+      source: '/api/pricing'
+    });
+  }
+
+  for (const record of groupRecordsFromPayload(pricingRecord?.auto_groups ?? pricingRecord?.autoGroups)) {
+    const name = groupNameFromRecord(record);
+    if (!name) {
+      continue;
+    }
+
+    groups.set(normalizeName(name), {
+      ...groups.get(normalizeName(name)),
+      id: stringValue(record.id),
+      name,
+      remark: groupRemarkFromRecord(record),
+      ratio: groupRatioFromRecord(record) ?? ratioFromValue(groupRatio[name]),
+      source: '/api/pricing'
+    });
+  }
+
+  for (const record of pricingRecordsFromPayload(value)) {
+    const enabledGroups = arrayOfStrings(record.enable_groups ?? record.enableGroups ?? record.groups);
+
+    for (const group of enabledGroups) {
+      if (!group.trim()) {
+        continue;
+      }
+
+      const previous = groups.get(normalizeName(group));
+      groups.set(normalizeName(group), {
+        ...previous,
+        name: group,
+        ratio: ratioFromValue(groupRatio[group]) ?? ratioFromValue(previous?.ratio),
+        source: '/api/pricing'
+      });
+    }
+  }
+
+  return [...groups.values()];
+}
+
+function pricingRecordsFromPayload(value: unknown): Array<Record<string, unknown>> {
+  const record = recordValue(value);
+
+  if (Array.isArray(value)) {
+    return value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object' && !Array.isArray(item));
+  }
+  if (!record) {
+    return [];
+  }
+
+  for (const key of ['pricing', 'prices', 'items', 'list', 'models', 'data', 'rows', 'records']) {
+    const nested = record[key];
+    if (Array.isArray(nested)) {
+      return nested.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object' && !Array.isArray(item));
+    }
+  }
+
+  return stringValue(record.model_name) || stringValue(record.model) || Array.isArray(record.enable_groups) ? [record] : [];
+}
+
+function arrayOfStrings(value: unknown) {
+  if (Array.isArray(value)) {
+    return value.map((item) => stringValue(item)).filter((item): item is string => Boolean(item));
+  }
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (Array.isArray(parsed)) {
+        return parsed.map((item) => stringValue(item)).filter((item): item is string => Boolean(item));
+      }
+    } catch {
+      return value.split(',').map((item) => item.trim()).filter(Boolean);
+    }
+  }
+
+  return [];
+}
+
 function groupRecordsFromPayload(value: unknown): Array<Record<string, unknown>> {
   const record = recordValue(value);
 
@@ -1476,7 +1611,7 @@ function groupRecordsFromPayload(value: unknown): Array<Record<string, unknown>>
   return Object.entries(record)
     .map(([key, entry]) => {
       if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
-        return { name: key, ...(entry as Record<string, unknown>) };
+        return { name: key, ratio: ratioFromValue(entry), ...(entry as Record<string, unknown>) };
       }
 
       return { name: key, ratio: entry };
@@ -2068,11 +2203,6 @@ function stringValue(value: unknown) {
   }
 
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
-}
-
-function suggestRechargeRatio(quotaPerUnit: number) {
-  const ratio = quotaPerUnit / 500000;
-  return Number.isFinite(ratio) && ratio >= 1 ? Math.max(1, Math.round(ratio)) : null;
 }
 
 function normalizeBaseUrl(baseUrl: string) {

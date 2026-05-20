@@ -115,6 +115,7 @@ type ChannelView = {
   models: number;
   groupRatio: number | null;
   rateSource: string;
+  lastError?: string | null;
   rechargeRatio: number;
   currentRate: number | null;
   previousRate: number | null;
@@ -343,7 +344,6 @@ type CredentialTestResult = {
   balanceCurrency?: string;
   groupRatio?: number | null;
   rateSource?: string;
-  suggestedRechargeRatio?: number | null;
 };
 
 type UpstreamGroupInfo = {
@@ -490,6 +490,8 @@ export default function DashboardPage() {
   const [groupChannels, setGroupChannels] = useState(true);
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
   const [authChecking, setAuthChecking] = useState(true);
+  const [dashboardLoaded, setDashboardLoaded] = useState(false);
+  const [dashboardLoading, setDashboardLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [syncingChannelId, setSyncingChannelId] = useState<string | null>(null);
   const [detectingUpstreamType, setDetectingUpstreamType] = useState(false);
@@ -622,7 +624,19 @@ export default function DashboardPage() {
 
   useEffect(() => {
     if (authStatus?.authenticated) {
-      void loadDashboard();
+      setDashboardLoading(true);
+      setDashboardLoaded(false);
+      void loadDashboard()
+        .catch((error) => {
+          messageApi.error(`系统加载失败：${errorMessage(error)}`);
+        })
+        .finally(() => {
+          setDashboardLoaded(true);
+          setDashboardLoading(false);
+        });
+    } else {
+      setDashboardLoaded(false);
+      setDashboardLoading(false);
     }
   }, [authStatus?.authenticated]);
 
@@ -708,6 +722,7 @@ export default function DashboardPage() {
   async function logout() {
     await fetch('/api/auth/logout', { method: 'POST' });
     setAuthStatus({ setupRequired: false, authenticated: false });
+    setDashboardLoaded(false);
     setRelays(initialRelays);
     setChannels(initialChannels);
     setEvents(initialEvents);
@@ -1536,12 +1551,8 @@ export default function DashboardPage() {
       }
 
       const result = payload as CredentialTestResult;
-      const rechargeRatio = normalizeSuggestedRechargeRatio(result.suggestedRechargeRatio);
 
       setCredentialTestResult(result);
-      if (rechargeRatio) {
-        form.setFieldValue('rechargeRatio', rechargeRatio);
-      }
       if (result.status === 'ok') {
         messageApi.success('凭证测试通过');
       } else {
@@ -1669,10 +1680,9 @@ export default function DashboardPage() {
   function credentialGroupPayload(
     group: CredentialGroup,
     values: PlatformCredentialForm,
-    options: { target?: ChannelView; suggestedRechargeRatio?: number | null } = {}
+    options: { target?: ChannelView } = {}
   ) {
     const channel = options.target ?? group.primary;
-    const suggestedRechargeRatio = normalizeSuggestedRechargeRatio(options.suggestedRechargeRatio);
 
     return {
       id: channel.id,
@@ -1688,8 +1698,7 @@ export default function DashboardPage() {
       credential: values.credential?.trim(),
       credentialAccount: values.credentialAccount?.trim(),
       credentialPassword: values.credentialPassword?.trim(),
-      rechargeRatio: suggestedRechargeRatio ?? channel.rechargeRatio,
-      syncGroupRechargeRatio: suggestedRechargeRatio !== null && suggestedRechargeRatio !== channel.rechargeRatio,
+      rechargeRatio: channel.rechargeRatio,
       priority: channel.priority,
       weight: channel.weight
     };
@@ -1796,7 +1805,6 @@ export default function DashboardPage() {
     const values = credentialForm.getFieldsValue();
     const primary = group.primary;
     const keyName = upstreamGroup.remark?.trim() || upstreamGroup.name;
-    const rechargeRatio = normalizeSuggestedRechargeRatio(credentialTestResult?.suggestedRechargeRatio) ?? primary.rechargeRatio;
 
     setCredentialModalOpen(false);
     setEditingCredentialGroupKey(null);
@@ -1812,7 +1820,7 @@ export default function DashboardPage() {
       auth: values.auth || primary.auth,
       keyName,
       group: upstreamGroup.name,
-      rechargeRatio,
+      rechargeRatio: primary.rechargeRatio,
       priority: primary.priority,
       weight: primary.weight
     });
@@ -1838,11 +1846,7 @@ export default function DashboardPage() {
       return;
     }
 
-    const suggestedRechargeRatio =
-      credentialTestResult?.ok && credentialTestResult.status !== 'error'
-        ? credentialTestResult.suggestedRechargeRatio
-        : null;
-    const payload = credentialGroupPayload(group, values, { suggestedRechargeRatio });
+    const payload = credentialGroupPayload(group, values);
 
     const response = await fetch('/api/channels', {
       method: 'PATCH',
@@ -1870,14 +1874,12 @@ export default function DashboardPage() {
     setUpstreamGroups([]);
     credentialForm.resetFields();
     setActiveView('credentials');
-    const rechargeRatio = normalizeSuggestedRechargeRatio(suggestedRechargeRatio);
-    messageApi.success(
-      rechargeRatio
-        ? `平台分组 ${group.name} 的凭证已保存，充值倍率 1:${formatRatio(rechargeRatio)}`
-        : `平台分组 ${group.name} 的凭证已保存`
-    );
+    messageApi.success(`平台分组 ${group.name} 的凭证已保存`);
     void loadDashboard().catch(() => undefined);
   }
+
+  const showSystemLoading = authChecking || (authStatus?.authenticated && (!dashboardLoaded || dashboardLoading));
+  const systemLoadingDetail = authChecking ? '正在验证登录状态' : '正在加载系统数据';
 
   return (
     <ConfigProvider
@@ -1905,10 +1907,11 @@ export default function DashboardPage() {
       }}
     >
       {contextHolder}
-      {authChecking || !authStatus?.authenticated ? (
+      {showSystemLoading ? (
+        <SystemLoadingScreen detail={systemLoadingDetail} />
+      ) : !authStatus?.authenticated ? (
         <AuthScreen
           status={authStatus}
-          checking={authChecking}
           onAuthenticated={(username) => setAuthStatus({ setupRequired: false, authenticated: true, username })}
         />
       ) : (
@@ -2759,11 +2762,9 @@ export default function DashboardPage() {
 
 function AuthScreen({
   status,
-  checking,
   onAuthenticated
 }: {
   status: AuthStatus | null;
-  checking: boolean;
   onAuthenticated: (username: string) => void;
 }) {
   const [form] = Form.useForm<LoginForm>();
@@ -2837,11 +2838,30 @@ function AuthScreen({
               <Input.Password autoComplete="new-password" />
             </Form.Item>
           ) : null}
-          <Button type="primary" htmlType="submit" block loading={busy || checking}>
+          <Button type="primary" htmlType="submit" block loading={busy}>
             {setupRequired ? '保存并登录' : '登录'}
           </Button>
         </Form>
       </Card>
+    </div>
+  );
+}
+
+function SystemLoadingScreen({ detail }: { detail: string }) {
+  return (
+    <div className="system-loading-shell" role="status" aria-busy="true">
+      <div className="system-loading-panel">
+        <div className="system-loading-orbit" aria-hidden="true">
+          <div className="system-loading-logo">
+            <ApiOutlined />
+          </div>
+        </div>
+        <div className="system-loading-copy">
+          <Title level={3}>系统正在加载</Title>
+          <Text type="secondary">{detail}</Text>
+        </div>
+        <div className="system-loading-bar" aria-hidden="true" />
+      </div>
     </div>
   );
 }
@@ -4338,10 +4358,6 @@ function CredentialTestPanel({ result }: { result: CredentialTestResult | null }
   const tone: StatusTone = result.status === 'ok' ? 'ok' : result.status === 'error' ? 'error' : 'warn';
   const balance = result.balance === undefined ? '-' : formatAmount(result.balance);
   const groupRatio = result.groupRatio === null || result.groupRatio === undefined ? '-' : formatGroupRatio(result.groupRatio);
-  const rechargeRatio =
-    result.suggestedRechargeRatio === null || result.suggestedRechargeRatio === undefined
-      ? '无法自动获取'
-      : `1:${formatRatio(result.suggestedRechargeRatio)}`;
 
   return (
     <div className="credential-test-panel">
@@ -4357,10 +4373,6 @@ function CredentialTestPanel({ result }: { result: CredentialTestResult | null }
         <span>
           <Text type="secondary">倍率分组</Text>
           <Text strong>{groupRatio}</Text>
-        </span>
-        <span>
-          <Text type="secondary">充值倍率</Text>
-          <Text strong>{rechargeRatio}</Text>
         </span>
         <span>
           <Text type="secondary">来源</Text>
@@ -5170,15 +5182,6 @@ function safeRechargeRatio(value: number | undefined) {
   return Number.isFinite(parsed) && parsed >= 0.01 ? Math.round(parsed * 100) / 100 : 1;
 }
 
-function normalizeSuggestedRechargeRatio(value: number | null | undefined) {
-  if (value === null || value === undefined) {
-    return null;
-  }
-
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed >= 0.01 ? Math.round(parsed * 100) / 100 : null;
-}
-
 function formatRatio(value: number | undefined) {
   return safeRechargeRatio(value).toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
 }
@@ -5472,6 +5475,13 @@ function monitorDetailLabel(channel: ChannelView) {
     return '不做余额/倍率巡检';
   }
 
+  if (channel.status === '凭证失效' || channel.status === '认证信息过期') {
+    return `原因：${failureReasonLabel(channel)}`;
+  }
+  if (channel.status === '同步失败' || channel.status === '读取失败') {
+    return `原因：${failureReasonLabel(channel)}`;
+  }
+
   const latencyDetail = latencyInspectionLabel(channel);
   if (latencyDetail) {
     return latencyDetail;
@@ -5493,6 +5503,22 @@ function monitorDetailLabel(channel: ChannelView) {
   }
 
   return value;
+}
+
+function failureReasonLabel(channel: ChannelView) {
+  const message = channel.lastError || channel.rateSource || channel.status;
+
+  if (/Unsupported state|authenticate data|credential payload|CREDENTIAL_SECRET/i.test(message)) {
+    return '认证信息无法解密，请重新保存该渠道密钥';
+  }
+  if (/Sub2API|email|username|password|账号密码|用户.*token|用户.*Token/i.test(message)) {
+    return '上游账号密码或用户 Token 无效/缺失，请重新保存凭证';
+  }
+  if (/HTTP 401|HTTP 403|unauthorized|forbidden|权限不足/i.test(message)) {
+    return '上游拒绝认证，请检查 Token、账号密码或上游用户 ID';
+  }
+
+  return message.replace(/\s+/g, ' ').slice(0, 80);
 }
 
 function latencyInspectionLabel(channel: ChannelView) {

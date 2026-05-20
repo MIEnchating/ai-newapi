@@ -125,6 +125,19 @@ function channelAlertEvents(ruleMap: Map<string, AlertRule>, channels: ChannelRe
       });
     }
 
+    const credentialFailure = isCredentialFailure(channel);
+    const credentialRule = expiredRule ?? syncRule;
+
+    if (credentialFailure && credentialRule) {
+      events.push({
+        title: `${channel.name} 凭证失效`,
+        detail: credentialFailureDetail(channel),
+        time: currentTime(),
+        status: severityStatus(credentialRule.severity)
+      });
+      continue;
+    }
+
     if (syncRule && /同步失败|读取失败/.test(channel.status)) {
       events.push({
         title: `${channel.name} 同步失败`,
@@ -143,10 +156,10 @@ function channelAlertEvents(ruleMap: Map<string, AlertRule>, channels: ChannelRe
       });
     }
 
-    if (expiredRule && /过期|失效|权限不足/.test(channel.status)) {
+    if (expiredRule && /过期|失效|权限不足|凭证/.test(channel.status)) {
       events.push({
-        title: `${channel.name} 认证异常`,
-        detail: channel.status,
+        title: `${channel.name} 凭证失效`,
+        detail: credentialFailureDetail(channel),
         time: currentTime(),
         status: severityStatus(expiredRule.severity)
       });
@@ -159,6 +172,36 @@ function channelAlertEvents(ruleMap: Map<string, AlertRule>, channels: ChannelRe
 function syncFailureDetail(channel: ChannelRecord) {
   const message = channel.lastError || channel.rateSource || channel.status;
 
+  return normalizeFailureMessage(message);
+}
+
+function credentialFailureDetail(channel: ChannelRecord) {
+  const message = channel.lastError || channel.rateSource || channel.status;
+
+  if (/Unsupported state|authenticate data|credential payload|CREDENTIAL_SECRET/i.test(message)) {
+    return '认证信息无法解密，请重新保存该渠道密钥';
+  }
+  if (/Sub2API|email|username|password|账号密码|用户.*token|用户.*Token/i.test(message)) {
+    return '上游账号密码或用户 Token 无效/缺失，请重新保存凭证';
+  }
+  if (/HTTP 401|HTTP 403|unauthorized|forbidden|权限不足/i.test(message)) {
+    return '上游拒绝认证，请检查 Token、账号密码或上游用户 ID';
+  }
+
+  return normalizeFailureMessage(message);
+}
+
+function isCredentialFailure(channel: ChannelRecord) {
+  if (!channel.credentialConfigured) {
+    return false;
+  }
+
+  const message = `${channel.status} ${channel.lastError ?? ''} ${channel.rateSource ?? ''}`;
+
+  return /凭证|认证信息过期|过期|失效|权限不足|Unsupported state|authenticate data|credential payload|CREDENTIAL_SECRET|HTTP 401|HTTP 403|unauthorized|forbidden|invalid token|token.*invalid|账号密码|password|用户.*token|用户.*Token/i.test(message);
+}
+
+function normalizeFailureMessage(message: string) {
   if (/Unsupported state|authenticate data|credential payload|CREDENTIAL_SECRET/i.test(message)) {
     return '认证信息无法解密，请重新保存该渠道密钥';
   }

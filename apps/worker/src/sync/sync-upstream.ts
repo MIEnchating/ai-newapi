@@ -1,4 +1,4 @@
-import { percentChange, stableRateKey, type RateInfo, type UpstreamAdapter } from '@ai-relay/shared';
+import { percentChange, stableRateKey, type RateInfo, type UpstreamAccountState, type UpstreamAdapter } from '@ai-relay/shared';
 import { AlertRuleType, RateDirection, UpstreamStatus, UpstreamType } from '@prisma/client';
 import { decryptCredentialPayload } from '../credentials';
 import { NewApiAdapter } from '../upstream-adapters/newapi-adapter';
@@ -109,8 +109,13 @@ export async function syncUpstream(upstreamId: string) {
 
   try {
     const adapter = createAdapter(upstream);
-    const state = await adapter.getAccountState();
-    const rates = await adapter.listRates();
+    const [ratesResult, stateResult] = await Promise.allSettled([
+      adapter.listRates(),
+      adapter.getAccountState()
+    ]);
+    const rates = ratesResult.status === 'fulfilled' ? ratesResult.value : [];
+    const state = accountStateFromResult(stateResult, ratesResult, rates);
+    const syncLastError = combinedSyncLastError(state, stateResult, ratesResult, rates);
     const previous = await loadPreviousRates(upstreamId, rates);
     const events = diffRates(previous, rates);
     const canonicalGroupName = canonicalRateGroupName(rates, upstream.groupName);
@@ -129,7 +134,7 @@ export async function syncUpstream(upstreamId: string) {
           balance: state.balance,
           balanceCurrency: state.balanceCurrency,
           concurrency: state.concurrency,
-          lastError: state.lastError ?? null,
+          lastError: syncLastError,
           lastSyncAt: new Date(),
           ...(canonicalGroupName && canonicalGroupName !== upstream.groupName ? { groupName: canonicalGroupName } : {}),
           ...persistedLatencyData
@@ -176,6 +181,7 @@ export async function syncUpstream(upstreamId: string) {
     const rawMessage = errorMessage(error);
     const message = clip(rawMessage, 1000);
     const challenge = /cloudflare|challenge|captcha|turnstile/i.test(message);
+    const credentialFailure = isCredentialFailure(message, Boolean(upstream.credential));
     const latencyData = latencyDataFromFailedSync(upstream, setting, latencyProbe, message);
     const persistedLatencyData = applyMainStationWriteResult(
       upstream,
@@ -187,7 +193,13 @@ export async function syncUpstream(upstreamId: string) {
       where: { id: upstreamId },
       data: {
         ...persistedLatencyData,
-        status: persistedLatencyData.status ?? (challenge ? UpstreamStatus.CHALLENGE_REQUIRED : UpstreamStatus.ERROR),
+        status: persistedLatencyData.status ?? (
+          challenge
+            ? UpstreamStatus.CHALLENGE_REQUIRED
+            : credentialFailure
+              ? UpstreamStatus.EXPIRED
+              : UpstreamStatus.ERROR
+        ),
         lastError: message,
         lastSyncAt: new Date()
       }
@@ -195,6 +207,57 @@ export async function syncUpstream(upstreamId: string) {
 
     throw error;
   }
+}
+
+function accountStateFromResult(
+  stateResult: PromiseSettledResult<UpstreamAccountState>,
+  ratesResult: PromiseSettledResult<RateInfo[]>,
+  rates: RateInfo[]
+): UpstreamAccountState {
+  if (stateResult.status === 'fulfilled') {
+    return stateResult.value;
+  }
+
+  if (rates.length > 0) {
+    return {
+      status: 'limited',
+      lastError: syncReadError('余额读取失败', stateResult.reason)
+    };
+  }
+
+  if (ratesResult.status === 'rejected') {
+    throw new Error(`${syncReadError('倍率读取失败', ratesResult.reason)}；${syncReadError('余额读取失败', stateResult.reason)}`);
+  }
+
+  throw stateResult.reason;
+}
+
+function combinedSyncLastError(
+  state: UpstreamAccountState,
+  stateResult: PromiseSettledResult<UpstreamAccountState>,
+  ratesResult: PromiseSettledResult<RateInfo[]>,
+  rates: RateInfo[]
+) {
+  const messages = [
+    stateResult.status === 'rejected' ? syncReadError('余额读取失败', stateResult.reason) : state.lastError,
+    ratesResult.status === 'rejected'
+      ? syncReadError('倍率读取失败', ratesResult.reason)
+      : rates.length === 0
+        ? '倍率读取为空：上游没有返回可保存的倍率'
+        : null
+  ].filter((message): message is string => Boolean(message));
+
+  return messages.length > 0 ? messages.join('；') : null;
+}
+
+function syncReadError(prefix: string, error: unknown) {
+  const raw = errorMessage(error);
+
+  if (/HTTP 401|HTTP 403|unauthorized|forbidden|insufficient privileges|权限不足/i.test(raw)) {
+    return `${prefix}：上游接口无权限或不可用`;
+  }
+
+  return `${prefix}：${clip(raw, 500)}`;
 }
 
 async function loadInspectionSetting() {
@@ -1072,6 +1135,10 @@ function createAdapter(upstream: {
 
 function parseCredential(payload?: string): Record<string, string> {
   return decryptCredentialPayload(payload);
+}
+
+function isCredentialFailure(message: string, credentialConfigured: boolean) {
+  return credentialConfigured && /Unsupported state|authenticate data|credential payload|CREDENTIAL_SECRET|HTTP 401|HTTP 403|unauthorized|forbidden|invalid token|token.*invalid|expired|失效|过期|权限不足|认证失败|鉴权失败|登录失败|password|账号密码|用户模式需要|需要 email|需要 upstreamUserId/i.test(message);
 }
 
 function toPrismaStatus(status: string): UpstreamStatus {
