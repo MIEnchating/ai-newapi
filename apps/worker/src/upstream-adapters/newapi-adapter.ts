@@ -39,11 +39,13 @@ export class NewApiAdapter implements UpstreamAdapter {
     const user = selfPayload ? unwrapData<Record<string, unknown>>(selfPayload) : {};
     const quota = numeric(user.quota);
     const balance = numeric(user.balance);
+    const resolvedBalance = quota !== undefined ? quota / quotaPerUnit : balance;
 
     return {
-      status: 'ok',
-      balance: quota !== undefined ? quota / quotaPerUnit : balance,
-      balanceCurrency: 'CNY'
+      status: resolvedBalance === undefined ? 'limited' : 'ok',
+      balance: resolvedBalance,
+      balanceCurrency: 'CNY',
+      lastError: resolvedBalance === undefined ? '余额未获取：NewAPI 没有返回 quota 或 balance' : undefined
     };
   }
 

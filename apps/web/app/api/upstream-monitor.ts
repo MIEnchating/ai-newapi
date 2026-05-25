@@ -55,7 +55,7 @@ export async function refreshChannelMonitoring(channel: ChannelRecord, context: 
     const nextChannel: ChannelRecord = {
       ...channel,
       group: snapshot.groupLabel ?? channel.group,
-      balance: snapshot.balance ?? '不可见',
+        balance: snapshot.balance ?? '未获取',
       models: snapshot.models ?? channel.models,
       groupRatio: snapshot.groupRatio,
       currentRate,
@@ -111,7 +111,7 @@ function limited(channel: ChannelRecord, status: string, detail: string): Refres
   return {
     channel: {
       ...channel,
-      balance: channel.upstreamType === 'cli_proxy' ? '-' : '不可见',
+      balance: channel.upstreamType === 'cli_proxy' ? '-' : '未获取',
       currentRate: null,
       previousRate: channel.currentRate ?? channel.previousRate,
       groupRatio: channel.groupRatio ?? null,
@@ -179,12 +179,12 @@ async function readNewApiSnapshot(channel: ChannelRecord, credential: string) {
         : groupStatus ?? '未找到倍率';
 
   return {
-    balance: balanceVisible ? formatAmount(quota / quotaPerUnit) : '不可见',
+    balance: balanceVisible ? formatAmount(quota / quotaPerUnit) : '未获取',
     models: modelsFromPricing || modelsFromRatioConfig,
     groupRatio,
     groupLabel: effectiveGroup,
     source: balanceError ? balanceError : source,
-    status: groupRatio === null ? (groupStatus ? '倍率读取失败' : '未找到倍率') : balanceVisible ? '正常' : balanceError ? '余额读取失败' : '余额不可见',
+    status: groupRatio === null ? (groupStatus ? '倍率读取失败' : '未找到倍率') : balanceVisible ? '正常' : balanceError ? '余额读取失败' : '余额未获取',
     limited: groupRatio === null || !balanceVisible
   };
 }
@@ -213,12 +213,12 @@ async function readSub2ApiSnapshot(channel: ChannelRecord, credential: string) {
   const balanceVisible = balance !== undefined;
 
   return {
-    balance: balanceVisible ? formatAmount(balance) : '不可见',
+    balance: balanceVisible ? formatAmount(balance) : '未获取',
     models: modelCount,
     groupRatio,
     groupLabel: groupRatioInfo.groupName ?? (matchedGroup ? stringValue(matchedGroup.name) ?? channel.group : channel.group),
     source: matchedKey ? `/api/v1/keys + ${groupRatioInfo.source}` : groupRatioInfo.source,
-    status: groupRatio === null ? '未找到倍率' : balanceVisible ? '正常' : '余额不可见',
+    status: groupRatio === null ? '未找到倍率' : balanceVisible ? '正常' : '余额未获取',
     limited: groupRatio === null || !balanceVisible
   };
 }
@@ -522,7 +522,7 @@ function errorMessage(error: unknown) {
 
 function formatAmount(value: number) {
   if (!Number.isFinite(value)) {
-    return '不可见';
+    return '未获取';
   }
 
   return value.toFixed(2);

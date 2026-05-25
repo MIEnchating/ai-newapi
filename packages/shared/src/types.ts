@@ -1,4 +1,4 @@
-export type UpstreamType = 'newapi' | 'sub2api';
+export type UpstreamType = 'newapi' | 'sub2api' | 'cli_proxy';
 
 export type AuthMode =
   | 'api_key'

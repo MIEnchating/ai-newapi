@@ -282,7 +282,7 @@ async function migrateLocalCpaChannels(store: ReturnType<typeof getStore>, persi
         auth: channel.auth || '无鉴权',
         credential: store.channelSecrets[channel.id]?.credential,
         createMainStation: false,
-        rechargeRatio: channel.rechargeRatio,
+        rechargeRatio: 1,
         priority: channel.priority,
         weight: channel.weight
       });
@@ -342,7 +342,7 @@ function cpaBackendPayload(
     auth: body.auth ?? existing?.auth ?? '无鉴权',
     credential: managementKey || undefined,
     createMainStation: false,
-    rechargeRatio: normalizeRechargeRatio(body.rechargeRatio ?? existing?.rechargeRatio),
+    rechargeRatio: 1,
     priority: options.cpaPreferred ? 100 : normalizeInteger(body.priority, options.fallbackPriority),
     weight: options.cpaPreferred ? 10 : normalizeInteger(body.weight, options.fallbackWeight)
   };
@@ -464,7 +464,7 @@ function channelEvent(title: string, channel: ChannelRecord): EventRecord {
   if (channel.upstreamType === 'cli_proxy') {
     detailParts.push('号池模式');
   } else {
-    detailParts.push(`充值 1:${formatRatio(channel.rechargeRatio)}`);
+    detailParts.push('余额和倍率只读同步');
   }
 
   return {
@@ -479,18 +479,9 @@ function appendEvent(store: ReturnType<typeof getStore>, event: EventRecord) {
   store.events = [event, ...store.events].slice(0, 20);
 }
 
-function normalizeRechargeRatio(value: unknown) {
-  const parsed = typeof value === 'number' ? value : Number(value);
-  return Number.isFinite(parsed) && parsed >= 0.01 ? Math.round(parsed * 100) / 100 : 1;
-}
-
 function normalizeInteger(value: unknown, fallback: number) {
   const parsed = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(parsed) ? Math.trunc(parsed) : fallback;
-}
-
-function formatRatio(value: number) {
-  return Math.max(0.01, value).toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
 }
 
 function errorMessage(error: unknown) {

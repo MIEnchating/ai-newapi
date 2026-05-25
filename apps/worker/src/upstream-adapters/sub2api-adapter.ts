@@ -26,12 +26,14 @@ export class Sub2ApiAdapter implements UpstreamAdapter {
     const token = await this.getToken();
     const payload = await requestJson<unknown>(this.config.baseUrl, '/api/v1/auth/me', { token });
     const user = unwrapData<Record<string, unknown>>(payload);
+    const balance = numeric(user.balance);
 
     return {
-      status: 'ok',
-      balance: numeric(user.balance),
+      status: balance === undefined ? 'limited' : 'ok',
+      balance,
       balanceCurrency: stringValue(user.currency) ?? stringValue(user.balance_currency) ?? 'CNY',
-      concurrency: numeric(user.concurrency)
+      concurrency: numeric(user.concurrency),
+      lastError: balance === undefined ? '余额未获取：Sub2API 没有返回 balance' : undefined
     };
   }
 

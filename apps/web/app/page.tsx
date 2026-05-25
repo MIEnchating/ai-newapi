@@ -804,35 +804,33 @@ export default function DashboardPage() {
           </Text>
           <Space size={6} wrap className="center-wrap">
             {record.upstreamType === 'cli_proxy' ? <Tag>不适用</Tag> : <CredentialTag mode={credentialMode(record)} />}
-            {record.upstreamType === 'cli_proxy' ? null : <RechargeRatioValue value={record.rechargeRatio} />}
           </Space>
         </Flex>
       )
     },
     {
-      title: '余额(1:1)',
+      title: '余额',
       dataIndex: 'balance',
       width: 92,
       render: (_, record) => <BalanceValue channel={record} />
     },
     {
-      title: '倍率(1:1)',
+      title: '倍率',
       key: 'rateSnapshot',
       width: 142,
       render: (_, record) => (
         <Flex vertical gap={4} className="metric-stack">
           <Space size={6}>
             <Text type="secondary">现</Text>
-            <RateValue value={record.currentRate} ratio={record.rechargeRatio} ignored={record.upstreamType === 'cli_proxy'} />
+            <RateValue value={record.currentRate} ignored={record.upstreamType === 'cli_proxy'} />
           </Space>
           <Space size={6}>
             <Text type="secondary">前</Text>
-            <RateValue value={record.previousRate} ratio={record.rechargeRatio} muted ignored={record.upstreamType === 'cli_proxy'} />
+            <RateValue value={record.previousRate} muted ignored={record.upstreamType === 'cli_proxy'} />
           </Space>
           <RateChange
             current={record.currentRate}
             previous={record.previousRate}
-            ratio={record.rechargeRatio}
             ignored={record.upstreamType === 'cli_proxy'}
           />
         </Flex>
@@ -936,14 +934,14 @@ export default function DashboardPage() {
       dataIndex: 'currentRate',
       width: 110,
       align: 'right',
-      render: (_, record) => <RateValue value={record.currentRate} ratio={rechargeRatioForRate(record.key, channels)} />
+      render: (_, record) => <RateValue value={record.currentRate} />
     },
     {
       title: '上次倍率',
       dataIndex: 'previousRate',
       width: 110,
       align: 'right',
-      render: (_, record) => <RateValue value={record.previousRate} ratio={rechargeRatioForRate(record.key, channels)} muted />
+      render: (_, record) => <RateValue value={record.previousRate} muted />
     },
     {
       title: '变化',
@@ -951,7 +949,7 @@ export default function DashboardPage() {
       width: 100,
       align: 'right',
       render: (_, record) => (
-        <RateChange current={record.currentRate} previous={record.previousRate} ratio={rechargeRatioForRate(record.key, channels)} />
+        <RateChange current={record.currentRate} previous={record.previousRate} />
       )
     }
   ];
@@ -1161,7 +1159,7 @@ export default function DashboardPage() {
       createMainStation: !channel,
       mainStationKey: '',
       models: '',
-      rechargeRatio: channel?.rechargeRatio ?? 1,
+      rechargeRatio: 1,
       priority: channel?.priority ?? 50,
       weight: channel?.weight ?? 0,
       enabled: channel?.enabled ?? true
@@ -1275,7 +1273,7 @@ export default function DashboardPage() {
         credential: undefined,
         credentialAccount: '',
         credentialPassword: '',
-        rechargeRatio: detectedType === 'cli_proxy' ? 1 : form.getFieldValue('rechargeRatio')
+        rechargeRatio: 1
       });
       messageApi.success(`已识别并选中 ${upstreamProviderLabel(detectedType)}`);
     } finally {
@@ -1411,6 +1409,7 @@ export default function DashboardPage() {
       credential: values.upstreamType === 'cli_proxy'
         ? values.credential?.trim() || values.credentialPassword?.trim()
         : values.credential,
+      rechargeRatio: 1,
       priority: cliProxyPreferred ? 100 : values.priority,
       weight: cliProxyPreferred ? 10 : values.weight
     };
@@ -1520,7 +1519,7 @@ export default function DashboardPage() {
       credential: values.credential?.trim(),
       credentialAccount: values.credentialAccount?.trim(),
       credentialPassword: values.credentialPassword?.trim(),
-      rechargeRatio: values.rechargeRatio ?? existingTarget?.rechargeRatio ?? 1,
+      rechargeRatio: 1,
       priority: values.priority ?? existingTarget?.priority ?? 50,
       weight: values.weight ?? existingTarget?.weight ?? 0
     };
@@ -1698,7 +1697,7 @@ export default function DashboardPage() {
       credential: values.credential?.trim(),
       credentialAccount: values.credentialAccount?.trim(),
       credentialPassword: values.credentialPassword?.trim(),
-      rechargeRatio: channel.rechargeRatio,
+      rechargeRatio: 1,
       priority: channel.priority,
       weight: channel.weight
     };
@@ -1820,7 +1819,7 @@ export default function DashboardPage() {
       auth: values.auth || primary.auth,
       keyName,
       group: upstreamGroup.name,
-      rechargeRatio: primary.rechargeRatio,
+      rechargeRatio: 1,
       priority: primary.priority,
       weight: primary.weight
     });
@@ -1945,7 +1944,11 @@ export default function DashboardPage() {
         <Layout className="app-main">
           <Header className="app-header">
             <div className="header-title">
-              <Title level={3}>{viewTitle(activeView)}</Title>
+              <Text className="header-kicker">RelayDesk Workbench</Text>
+              <div className="header-title-row">
+                <Title level={3}>{viewTitle(activeView)}</Title>
+                {selectedRelay ? <StatusTag tone={selectedRelay.statusTone}>{selectedRelay.status}</StatusTag> : null}
+              </div>
               <Text type="secondary">{viewDescription(activeView)}</Text>
             </div>
             <div className="header-actions">
@@ -2202,7 +2205,7 @@ export default function DashboardPage() {
           <Form.Item name="relayId" hidden>
             <Input />
           </Form.Item>
-          <FormSection title="基本信息" description="平台分组从渠道名第一个 - 或 _ 自动拆；倍率分组不从名字猜，只用上游识别或手填。">
+          <FormSection title="基本信息" description="平台分组从渠道名第一个 - 或 _ 自动拆；这里只保存上游分组名，倍率值只来自上游同步结果。">
             <Form.Item noStyle shouldUpdate={(prev, next) => prev.upstreamType !== next.upstreamType}>
               {({ getFieldValue }) => {
                 const isCliProxy = getFieldValue('upstreamType') === 'cli_proxy';
@@ -2272,8 +2275,8 @@ export default function DashboardPage() {
                     <Col xs={24} md={12}>
                       <Form.Item
                         name="group"
-                        label="上游分组（倍率分组）"
-                        extra="这是上游系统里的倍率分组；先读取上游分组后可下拉选择，识别不到仍可手动输入。"
+                        label="上游分组"
+                        extra="只填写上游分组名称；实际倍率不允许手填，读取不到就显示未获取。"
                         rules={[{ required: true, message: '请输入上游分组' }]}
                       >
                         <AutoComplete
@@ -2474,7 +2477,7 @@ export default function DashboardPage() {
             }
           </Form.Item>
 
-          <FormSection title="策略参数" description="这些值用于页面展示和主站渠道调度口径。">
+          <FormSection title="策略参数" description="只配置主站调度参数；余额和倍率只读展示，不在页面手填。">
             <Form.Item
               name="enabled"
               label="启用状态"
@@ -2502,50 +2505,19 @@ export default function DashboardPage() {
             <Form.Item noStyle shouldUpdate={(prev, next) => prev.upstreamType !== next.upstreamType}>
               {({ getFieldValue }) => {
                 const type = getFieldValue('upstreamType');
-                const isCliProxy = type === 'cli_proxy';
 
                 return (
                   <Row gutter={12}>
-                    <Col xs={24} md={isCliProxy ? 12 : 8}>
+                    <Col xs={24} md={12}>
                       <Form.Item name="priority" label="优先级" extra="自动巡检按 1-100 回写；0 表示不参与调度。" rules={[{ required: true, message: '请输入优先级' }]}>
                         <InputNumber min={0} max={100} precision={0} className="full-width" />
                       </Form.Item>
                     </Col>
-                    <Col xs={24} md={isCliProxy ? 12 : 8}>
+                    <Col xs={24} md={12}>
                       <Form.Item name="weight" label="权重" extra="新增默认 0；自动巡检按 1-10 回写。" rules={[{ required: true, message: '请输入权重' }]}>
                         <InputNumber min={0} max={10} precision={0} className="full-width" />
                       </Form.Item>
                     </Col>
-                    {isCliProxy ? null : (
-                      <Col xs={24} md={8}>
-                        <Form.Item label="充值比例" extra="上游 1 元到账 10 额度就填 10。">
-                          <Space.Compact className="full-width">
-                            <Input value="1:" className="ratio-prefix" disabled />
-                            <Form.Item
-                              name="rechargeRatio"
-                              noStyle
-                              rules={[
-                                { required: true, message: '请输入充值比例' },
-                                {
-                                  validator: (_, value) =>
-                                    Number.isFinite(Number(value)) && Number(value) >= 0.01
-                                      ? Promise.resolve()
-                                      : Promise.reject(new Error('充值比例必须大于 0，最多两位小数'))
-                                }
-                              ]}
-                            >
-                              <InputNumber
-                                min={0.01}
-                                step={0.01}
-                                precision={2}
-                                className="ratio-input"
-                                disabled={!isKnownUpstreamType(type)}
-                              />
-                            </Form.Item>
-                          </Space.Compact>
-                        </Form.Item>
-                      </Col>
-                    )}
                   </Row>
                 );
               }}
@@ -2554,7 +2526,7 @@ export default function DashboardPage() {
               {({ getFieldValue }) =>
                 getFieldValue('upstreamType') === 'cli_proxy' ? (
                   <div className="form-note">
-                    <Text type="secondary">CPA 是号池模式，不读取余额、倍率和充值比例；管理密钥单独加密保存。</Text>
+                    <Text type="secondary">CPA 是号池模式，不读取余额和倍率；管理密钥单独加密保存。</Text>
                   </div>
                 ) : null
               }
@@ -2903,7 +2875,7 @@ function OverviewView({
         <Col xs={24} sm={12} xl={6}>
           <Card>
             <Statistic title="渠道" value={channelCount} prefix={<CloudOutlined />} suffix={<Text type="secondary">个</Text>} />
-            <Text type="secondary">{readableCount} 个可读取倍率和余额</Text>
+            <Text type="secondary">{readableCount} 个已获取倍率和余额</Text>
           </Card>
         </Col>
         <Col xs={24} sm={12} xl={6}>
@@ -4356,8 +4328,8 @@ function CredentialTestPanel({ result }: { result: CredentialTestResult | null }
   }
 
   const tone: StatusTone = result.status === 'ok' ? 'ok' : result.status === 'error' ? 'error' : 'warn';
-  const balance = result.balance === undefined ? '-' : formatAmount(result.balance);
-  const groupRatio = result.groupRatio === null || result.groupRatio === undefined ? '-' : formatGroupRatio(result.groupRatio);
+  const balance = result.balance === undefined ? '未获取' : formatAmount(result.balance);
+  const groupRatio = result.groupRatio === null || result.groupRatio === undefined ? '未获取' : formatGroupRatio(result.groupRatio);
 
   return (
     <div className="credential-test-panel">
@@ -4413,7 +4385,7 @@ function UpstreamGroupsPanel({
       title: '倍率',
       dataIndex: 'ratio',
       width: 90,
-      render: (value) => <Text>{value === null || value === undefined ? '-' : formatGroupRatio(value)}</Text>
+      render: (value) => <Text type={value === null || value === undefined ? 'secondary' : undefined}>{value === null || value === undefined ? '未获取' : formatGroupRatio(value)}</Text>
     },
     {
       title: '来源',
@@ -4655,38 +4627,22 @@ function BalanceValue({ channel }: { channel: ChannelView }) {
 
   const parsed = parseNumericText(channel.balance);
   if (parsed !== null) {
-    const normalized = normalizeByRechargeRatio(parsed, channel.rechargeRatio);
-    const title =
-      safeRechargeRatio(channel.rechargeRatio) === 1
-        ? undefined
-        : `原始 ${channel.balance}，按 1:${formatRatio(channel.rechargeRatio)} 折算`;
-
-    return <Text title={title}>{formatAmount(normalized)}</Text>;
+    return <Text>{formatAmount(parsed)}</Text>;
   }
 
   return (
     <Tooltip title={balanceHint(channel)}>
-      <Text type={channel.balance === '不可见' ? 'secondary' : undefined}>{channel.balance}</Text>
+      <Text type="secondary">{channel.balance || '未获取'}</Text>
     </Tooltip>
   );
 }
 
-function RechargeRatioValue({ value, ignored }: { value: number; ignored?: boolean }) {
-  if (ignored) {
-    return <Text type="secondary">不适用</Text>;
-  }
-
-  return <Text>1:{formatRatio(value)}</Text>;
-}
-
 function RateValue({
   value,
-  ratio,
   muted,
   ignored
 }: {
   value: number | null;
-  ratio?: number;
   muted?: boolean;
   ignored?: boolean;
 }) {
@@ -4695,15 +4651,12 @@ function RateValue({
   }
 
   if (value === null) {
-    return <Text type="secondary">-</Text>;
+    return <Text type="secondary">未获取</Text>;
   }
 
-  const normalized = normalizeByRechargeRatio(value, ratio);
-  const title = safeRechargeRatio(ratio) === 1 ? undefined : `原始 ${formatRateNumber(value)}x，按 1:${formatRatio(ratio)} 折算`;
-
   return (
-    <Text type={muted ? 'secondary' : undefined} title={title}>
-      {formatRateNumber(normalized)}x
+    <Text type={muted ? 'secondary' : undefined}>
+      {formatRateNumber(value)}x
     </Text>
   );
 }
@@ -4711,12 +4664,10 @@ function RateValue({
 function RateChange({
   current,
   previous,
-  ratio,
   ignored
 }: {
   current: number | null;
   previous: number | null;
-  ratio?: number;
   ignored?: boolean;
 }) {
   if (ignored) {
@@ -4724,12 +4675,10 @@ function RateChange({
   }
 
   if (current === null || previous === null || previous === 0) {
-    return <Text type="secondary">待同步</Text>;
+    return <Text type="secondary">未获取</Text>;
   }
 
-  const normalizedCurrent = normalizeByRechargeRatio(current, ratio);
-  const normalizedPrevious = normalizeByRechargeRatio(previous, ratio);
-  const change = ((normalizedCurrent - normalizedPrevious) / normalizedPrevious) * 100;
+  const change = ((current - previous) / previous) * 100;
 
   if (change > 0) {
     return <Text type="danger">+{change.toFixed(1)}%</Text>;
@@ -5122,7 +5071,7 @@ function compareChannelId(left: string, right: string) {
 function buildRateRows(channels: ChannelView[], relays: RelayView[]): RateRow[] {
   return channels.filter((channel) => channel.upstreamType !== 'cli_proxy').map((channel) => {
     const relay = relays.find((item) => item.id === channel.relayId);
-    const direction = rateDirection(channel.currentRate, channel.previousRate, channel.rechargeRatio);
+    const direction = rateDirection(channel.currentRate, channel.previousRate);
 
     return {
       key: channel.id,
@@ -5132,8 +5081,8 @@ function buildRateRows(channels: ChannelView[], relays: RelayView[]): RateRow[] 
       upstreamType: channel.upstreamType,
       keyName: channel.keyName?.trim() || channel.name,
       group: rateGroupLabel(channel),
-      input: channel.groupRatio === null ? '上游分组倍率待同步' : `上游分组倍率 ${formatGroupRatio(channel.groupRatio)}`,
-      output: channel.rateSource || '待同步',
+      input: channel.groupRatio === null ? '上游倍率未获取' : `上游倍率 ${formatGroupRatio(channel.groupRatio)}`,
+      output: channel.rateSource || '未获取',
       currentRate: channel.currentRate,
       previousRate: channel.previousRate,
       direction
@@ -5169,26 +5118,9 @@ function groupRateRowsByUpstream(rows: RateRow[]): RateGroup[] {
     .sort((left, right) => channelIdCollator.compare(left.name, right.name));
 }
 
-function rechargeRatioForRate(channelId: string, channels: ChannelView[]) {
-  return channels.find((channel) => channel.id === channelId)?.rechargeRatio ?? 1;
-}
-
-function normalizeByRechargeRatio(value: number, ratio: number | undefined) {
-  return value / safeRechargeRatio(ratio);
-}
-
-function safeRechargeRatio(value: number | undefined) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed >= 0.01 ? Math.round(parsed * 100) / 100 : 1;
-}
-
-function formatRatio(value: number | undefined) {
-  return safeRechargeRatio(value).toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
-}
-
 function formatGroupRatio(value: number | null) {
   if (value === null) {
-    return '待同步';
+    return '未获取';
   }
 
   return `${formatRateNumber(value)}x`;
@@ -5321,19 +5253,16 @@ function formatLatencySeconds(value: number) {
   return `${seconds >= 10 ? Math.round(seconds) : Number(seconds.toFixed(2))}秒`;
 }
 
-function rateDirection(current: number | null, previous: number | null, ratio?: number): RateRow['direction'] {
+function rateDirection(current: number | null, previous: number | null): RateRow['direction'] {
   if (current === null || previous === null || previous === 0) {
     return 'limited';
   }
 
-  const normalizedCurrent = normalizeByRechargeRatio(current, ratio);
-  const normalizedPrevious = normalizeByRechargeRatio(previous, ratio);
-
-  if (normalizedCurrent > normalizedPrevious) {
+  if (current > previous) {
     return 'up';
   }
 
-  if (normalizedCurrent < normalizedPrevious) {
+  if (current < previous) {
     return 'down';
   }
 
@@ -5487,10 +5416,10 @@ function monitorDetailLabel(channel: ChannelView) {
     return latencyDetail;
   }
 
-  const value = channel.rateSource || '待同步';
+  const value = channel.rateSource || '未获取';
 
-  if (value === '待同步') {
-    return '倍率：待同步';
+  if (value === '待同步' || value === '未获取') {
+    return '倍率：未获取';
   }
   if (value === '待配置认证信息') {
     return '认证：待配置';
@@ -5555,15 +5484,14 @@ function latencyInspectionLabel(channel: ChannelView) {
 function canReadRateAndBalance(channel: ChannelView) {
   return (
     channel.upstreamType !== 'cli_proxy' &&
-    channel.credentialConfigured &&
-    channel.auth !== 'API Key' &&
-    channel.statusTone !== 'limited'
+    channel.currentRate !== null &&
+    parseNumericText(channel.balance) !== null
   );
 }
 
 function balanceHint(channel: ChannelView) {
-  if (channel.balance === '待同步') {
-    return '已配置可读取余额的认证信息，点击同步后读取余额。';
+  if (channel.balance === '待同步' || channel.balance === '未获取') {
+    return '已配置可读取余额的认证信息，但当前没有获取到余额。';
   }
 
   if (channel.status === '待配置凭据' || channel.status === '待配置认证信息') {
@@ -5584,7 +5512,7 @@ function balanceHint(channel: ChannelView) {
     return channel.rateSource || 'Token、账号密码或上游用户 ID 校验失败。';
   }
 
-  if (channel.status === '余额不可见') {
+  if (channel.status === '余额不可见' || channel.status === '余额未获取') {
     return channel.upstreamType === 'newapi'
       ? '已读到倍率，但 /api/user/self 没返回余额。请确认填写的是 NewAPI Token/账号密码和上游用户 ID。'
       : '已读到倍率，但 /api/v1/auth/me 没返回余额。请确认填写的是 Sub2API 用户 Token 或账号密码。';

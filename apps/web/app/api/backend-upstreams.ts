@@ -413,16 +413,14 @@ function toBackendPayload(input: ChannelInput, partial = false) {
   assign(payload, 'mainStationKey', input.mainStationKey?.trim());
   assign(payload, 'mainStationChannelType', input.mainStationChannelType);
   assign(payload, 'models', input.models?.trim());
-  if (!partial || input.rechargeRatio !== undefined) {
-    assign(payload, 'rechargeRatio', normalizeRechargeRatio(input.rechargeRatio, 1));
-  }
+  assign(payload, 'rechargeRatio', 1);
   if (!partial || input.priority !== undefined) {
     assign(payload, 'priority', normalizeInteger(input.priority, 50));
   }
   if (!partial || input.weight !== undefined) {
     assign(payload, 'weight', normalizeInteger(input.weight, 0));
   }
-  assign(payload, 'syncGroupRechargeRatio', input.syncGroupRechargeRatio === true ? true : undefined);
+  assign(payload, 'syncGroupRechargeRatio', undefined);
 
   const credential = toCredentialPayload(input);
   if (credential) {
@@ -562,7 +560,7 @@ function toChannelRecord(upstream: BackendUpstream): ChannelRecord {
     balance: balanceText(upstream, credentialConfigured),
     models: upstream._count?.rateSnapshots ?? 0,
     groupRatio: groupRate.current,
-    rateSource: failureReason ?? groupRate.source ?? (upstream._count?.rateSnapshots ? '未找到当前上游分组倍率' : credentialConfigured ? '待同步' : '待配置认证信息'),
+    rateSource: failureReason ?? groupRate.source ?? (upstream._count?.rateSnapshots ? '未找到当前上游分组倍率' : credentialConfigured ? '未获取' : '未配置认证信息'),
     rechargeRatio: normalizeRechargeRatio(upstream.rechargeRatio, 1),
     currentRate: groupRate.current,
     previousRate: groupRate.previous,
@@ -814,12 +812,12 @@ function isCredentialFailureMessage(message: string) {
   return /Unsupported state|authenticate data|credential payload|CREDENTIAL_SECRET|HTTP 401|HTTP 403|unauthorized|forbidden|invalid token|token.*invalid|expired|失效|过期|权限不足|认证失败|鉴权失败|登录失败|password|账号密码|用户模式需要|需要 email|需要 upstreamUserId/i.test(message);
 }
 
-function balanceText(upstream: BackendUpstream, credentialConfigured: boolean) {
+function balanceText(upstream: BackendUpstream, _credentialConfigured: boolean) {
   if (upstream.balance !== null && upstream.balance !== undefined) {
     return formatAmount(upstream.balance);
   }
 
-  return credentialConfigured ? '待同步' : '不可见';
+  return '未获取';
 }
 
 function formatAmount(value: string | number) {

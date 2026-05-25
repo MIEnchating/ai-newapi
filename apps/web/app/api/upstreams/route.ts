@@ -36,7 +36,6 @@ export async function POST(request: Request) {
     type?: UpstreamProvider;
     auth?: string;
     credential?: string;
-    rechargeRatio?: number;
     priority?: number;
     weight?: number;
   };
@@ -58,14 +57,14 @@ export async function POST(request: Request) {
       upstreamBaseUrl: body.baseUrl,
       auth: body.auth,
       credential: body.credential,
-      rechargeRatio: body.rechargeRatio,
+      rechargeRatio: 1,
       priority: body.priority,
       weight: body.weight
     });
     const store = getStore();
     const event: EventRecord = {
       title: `新增渠道上游 ${body.name}`,
-      detail: `${providerLabel(body.type)} / ${body.auth} / 充值 1:${formatRatio(body.rechargeRatio)}`,
+      detail: `${providerLabel(body.type)} / ${body.auth} / 余额和倍率只读同步`,
       time: currentTime(),
       status: 'success'
     };
@@ -76,11 +75,6 @@ export async function POST(request: Request) {
   } catch (error) {
     return NextResponse.json({ error: errorMessage(error) }, { status: 502 });
   }
-}
-
-function formatRatio(value: number | undefined) {
-  const parsed = typeof value === 'number' ? value : Number(value);
-  return (Number.isFinite(parsed) && parsed >= 0.01 ? parsed : 1).toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
 }
 
 function errorMessage(error: unknown) {

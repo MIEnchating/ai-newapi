@@ -90,13 +90,15 @@ export async function syncUpstream(upstreamId: string) {
   }
 
   if (upstreamRecord.type === UpstreamType.CLI_PROXY) {
-    await prisma.upstream.update({
-      where: { id: upstreamId },
-      data: {
-        lastError: null,
-        lastSyncAt: new Date()
-      }
-    });
+    await withDbWriteRetry(() =>
+      prisma.upstream.update({
+        where: { id: upstreamId },
+        data: {
+          lastError: null,
+          lastSyncAt: new Date()
+        }
+      })
+    );
     return;
   }
 
@@ -127,56 +129,58 @@ export async function syncUpstream(upstreamId: string) {
       await syncMainStationChannelIfNeeded(upstream, { ...latencyData, ...ruleData })
     );
 
-    await prisma.$transaction(async (tx) => {
-      await tx.upstream.update({
-        where: { id: upstreamId },
-        data: {
-          balance: state.balance,
-          balanceCurrency: state.balanceCurrency,
-          concurrency: state.concurrency,
-          lastError: syncLastError,
-          lastSyncAt: new Date(),
-          ...(canonicalGroupName && canonicalGroupName !== upstream.groupName ? { groupName: canonicalGroupName } : {}),
-          ...persistedLatencyData
+    await withDbWriteRetry(() =>
+      prisma.$transaction(async (tx) => {
+        await tx.upstream.update({
+          where: { id: upstreamId },
+          data: {
+            balance: state.balance,
+            balanceCurrency: state.balanceCurrency,
+            concurrency: state.concurrency,
+            lastError: syncLastError,
+            lastSyncAt: new Date(),
+            ...(canonicalGroupName && canonicalGroupName !== upstream.groupName ? { groupName: canonicalGroupName } : {}),
+            ...persistedLatencyData
+          }
+        });
+
+        if (rates.length > 0) {
+          await tx.rateSnapshot.createMany({
+            data: rates.map((rate) => ({
+              upstreamId,
+              provider: rate.provider,
+              model: rate.model,
+              groupName: rate.group,
+              channelName: rate.channelName,
+              inputPrice: rate.inputPrice,
+              outputPrice: rate.outputPrice,
+              modelRatio: rate.modelRatio,
+              completionRatio: rate.completionRatio,
+              currency: rate.currency,
+              source: rate.source,
+              rawHash: rate.rawHash,
+              capturedAt: new Date(rate.capturedAt)
+            }))
+          });
         }
-      });
 
-      if (rates.length > 0) {
-        await tx.rateSnapshot.createMany({
-          data: rates.map((rate) => ({
-            upstreamId,
-            provider: rate.provider,
-            model: rate.model,
-            groupName: rate.group,
-            channelName: rate.channelName,
-            inputPrice: rate.inputPrice,
-            outputPrice: rate.outputPrice,
-            modelRatio: rate.modelRatio,
-            completionRatio: rate.completionRatio,
-            currency: rate.currency,
-            source: rate.source,
-            rawHash: rate.rawHash,
-            capturedAt: new Date(rate.capturedAt)
-          }))
-        });
-      }
-
-      if (events.length > 0) {
-        await tx.rateChangeEvent.createMany({
-          data: events.map((event) => ({
-            upstreamId,
-            provider: event.provider,
-            model: event.model,
-            groupName: event.group,
-            field: event.field,
-            direction: event.direction,
-            oldValue: event.oldValue,
-            newValue: event.newValue,
-            changePercent: event.changePercent
-          }))
-        });
-      }
-    });
+        if (events.length > 0) {
+          await tx.rateChangeEvent.createMany({
+            data: events.map((event) => ({
+              upstreamId,
+              provider: event.provider,
+              model: event.model,
+              groupName: event.group,
+              field: event.field,
+              direction: event.direction,
+              oldValue: event.oldValue,
+              newValue: event.newValue,
+              changePercent: event.changePercent
+            }))
+          });
+        }
+      })
+    );
   } catch (error) {
     const rawMessage = errorMessage(error);
     const message = clip(rawMessage, 1000);
@@ -189,24 +193,59 @@ export async function syncUpstream(upstreamId: string) {
       await syncMainStationChannelIfNeeded(upstream, latencyData)
     );
 
-    await prisma.upstream.update({
-      where: { id: upstreamId },
-      data: {
-        ...persistedLatencyData,
-        status: persistedLatencyData.status ?? (
-          challenge
-            ? UpstreamStatus.CHALLENGE_REQUIRED
-            : credentialFailure
-              ? UpstreamStatus.EXPIRED
-              : UpstreamStatus.ERROR
-        ),
-        lastError: message,
-        lastSyncAt: new Date()
-      }
-    });
+    await withDbWriteRetry(() =>
+      prisma.upstream.update({
+        where: { id: upstreamId },
+        data: {
+          ...persistedLatencyData,
+          status: persistedLatencyData.status ?? (
+            challenge
+              ? UpstreamStatus.CHALLENGE_REQUIRED
+              : credentialFailure
+                ? UpstreamStatus.EXPIRED
+                : UpstreamStatus.ERROR
+          ),
+          lastError: message,
+          lastSyncAt: new Date()
+        }
+      })
+    );
+
+    if (credentialFailure || challenge) {
+      return;
+    }
 
     throw error;
   }
+}
+
+async function withDbWriteRetry<T>(action: () => Promise<T>, attempts = 3): Promise<T> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await action();
+    } catch (error) {
+      lastError = error;
+      if (attempt >= attempts || !isRetryableDbWriteError(error)) {
+        throw error;
+      }
+      await sleep(120 * attempt);
+    }
+  }
+
+  throw lastError;
+}
+
+function isRetryableDbWriteError(error: unknown) {
+  const message = errorMessage(error);
+  const code = typeof error === 'object' && error !== null && 'code' in error ? String((error as { code?: unknown }).code) : '';
+
+  return code === 'P2034' || /deadlock|write conflict|Transaction failed|1205|1213/i.test(message);
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function accountStateFromResult(
@@ -488,8 +527,8 @@ function latencySuccessData(
   const dispatch = tooSlow
     ? shouldDisable
       ? zeroDispatch(setting)
-      : adjustedDispatchForSetting(setting, groupRatio, latencyMs, upstream.rechargeRatio)
-    : adjustedDispatchForSetting(setting, groupRatio, latencyMs, upstream.rechargeRatio);
+      : adjustedDispatchForSetting(setting, groupRatio, latencyMs)
+    : adjustedDispatchForSetting(setting, groupRatio, latencyMs);
   const latencyLastError = tooSlow
     ? `延迟 ${latencyMs}ms 超过阈值 ${threshold}ms${latencyDisableSkipMessage(upstream, setting)}`
     : null;
@@ -538,8 +577,8 @@ function latencyPassedData(
     ...(tooSlow
       ? shouldDisable
         ? zeroDispatch(setting)
-        : adjustedDispatchForSetting(setting, null, latencyMs, upstream.rechargeRatio)
-      : adjustedDispatchForSetting(setting, null, latencyMs, upstream.rechargeRatio)),
+        : adjustedDispatchForSetting(setting, null, latencyMs)
+      : adjustedDispatchForSetting(setting, null, latencyMs)),
     status: shouldDisable ? UpstreamStatus.DISABLED : undefined,
     latencyMs,
     latencyCheckedAt: now,
@@ -970,16 +1009,14 @@ function zeroDispatch(setting: InspectionSettingState) {
 function adjustedDispatchForSetting(
   setting: InspectionSettingState,
   groupRatio: number | null,
-  latencyMs: number,
-  rechargeRatio: unknown
+  latencyMs: number
 ) {
-  return setting.priorityUpdateEnabled ? adjustedDispatch(groupRatio, latencyMs, rechargeRatio, setting.priorityStrategy) : {};
+  return setting.priorityUpdateEnabled ? adjustedDispatch(groupRatio, latencyMs, setting.priorityStrategy) : {};
 }
 
-function adjustedDispatch(groupRatio: number | null, latencyMs: number, rechargeRatio: unknown, strategy: PriorityStrategy) {
+function adjustedDispatch(groupRatio: number | null, latencyMs: number, strategy: PriorityStrategy) {
   const effectiveRatio = normalizePositive(groupRatio) ?? 1;
-  const recharge = Math.max(0.01, normalizePositive(rechargeRatio) ?? 1);
-  const ratioScore = clampInteger(Math.round(100 / (effectiveRatio * recharge)), 1, 100);
+  const ratioScore = clampInteger(Math.round(100 / effectiveRatio), 1, 100);
   const latencyScore = clampInteger(Math.round(100 - latencyMs / 200), 1, 100);
   const priority = strategy === 'BALANCED'
     ? clampInteger(Math.round(ratioScore * 0.65 + latencyScore * 0.35), 1, 100)
