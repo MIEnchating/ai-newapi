@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable } from '@nestjs/common';
 import { AuthMode, Prisma, UpstreamStatus, UpstreamType } from '@prisma/client';
 import { decryptCredentialPayload, encryptCredentialPayload } from '../vault/credential-vault';
 import { PrismaService } from '../prisma.service';
@@ -109,11 +109,12 @@ type CpaUsageRecord = {
 @Injectable()
 export class UpstreamsService {
   private schemaChecked = false;
+  private schemaPromise: Promise<void> | null = null;
   private readonly cpaUsageRecords = new Map<string, CpaUsageRecord[]>();
 
   constructor(
-    private readonly prisma: PrismaService,
-    private readonly syncQueue: SyncQueueService
+    @Inject(PrismaService) private readonly prisma: PrismaService,
+    @Inject(SyncQueueService) private readonly syncQueue: SyncQueueService
   ) {}
 
   async list() {
@@ -756,6 +757,20 @@ export class UpstreamsService {
       return;
     }
 
+    if (!this.schemaPromise) {
+      this.schemaPromise = this.ensureSchemaOnce().finally(() => {
+        this.schemaPromise = null;
+      });
+    }
+
+    await this.schemaPromise;
+  }
+
+  private async ensureSchemaOnce() {
+    if (this.schemaChecked) {
+      return;
+    }
+
     for (const statement of [
       "ALTER TABLE Upstream MODIFY COLUMN type ENUM('NEWAPI','SUB2API','CLI_PROXY') NOT NULL",
       'ALTER TABLE Upstream MODIFY COLUMN rechargeRatio DECIMAL(10,2) NOT NULL DEFAULT 1',
@@ -765,7 +780,7 @@ export class UpstreamsService {
       'ALTER TABLE Credential MODIFY COLUMN encryptedPayload TEXT NOT NULL'
     ]) {
       try {
-        await this.prisma.$executeRawUnsafe(statement);
+        await retrySchemaStatement(() => this.prisma.$executeRawUnsafe(statement));
       } catch (error) {
         if (!/Unknown column|Duplicate column|doesn't exist|1060|1061|1146|already|syntax/i.test(errorMessage(error))) {
           throw error;
@@ -1256,7 +1271,7 @@ async function newApiAuthContext(
   upstreamUserId: string | null
 ): Promise<RequestInit & { token?: string }> {
   if (authMode === AuthMode.PASSWORD) {
-    return newApiPasswordAuthContext(baseUrl, credential, upstreamUserId);
+    return newApiPasswordAuthContext(baseUrl, credential);
   }
 
   const token = credential.adminToken ?? credential.token ?? credential.bearerToken;
@@ -1275,8 +1290,7 @@ async function newApiAuthContext(
 
 async function newApiPasswordAuthContext(
   baseUrl: string,
-  credential: Record<string, string>,
-  upstreamUserId: string | null
+  credential: Record<string, string>
 ): Promise<RequestInit> {
   const account = credential.email ?? credential.username;
   const password = credential.password;
@@ -1300,13 +1314,15 @@ async function newApiPasswordAuthContext(
     throw new Error('NewAPI 登录成功但没有返回 session cookie');
   }
 
-  const userId = upstreamUserId ?? credential.userId ?? stringValue(data.id);
-  if (!userId) {
-    throw new Error('请输入 NewAPI 上游用户 ID');
-  }
-
   const headers = new Headers({ cookie });
-  headers.set('New-Api-User', userId);
+  const userId =
+    stringValue(data.id) ??
+    stringValue(data.user_id) ??
+    stringValue(data.userId) ??
+    stringValue(recordValue(data.user)?.id);
+  if (userId) {
+    headers.set('New-Api-User', userId);
+  }
 
   return { headers };
 }
@@ -2220,6 +2236,28 @@ function stripBearer(value: string) {
 
 function clip(text: string) {
   return text.replace(/\s+/g, ' ').slice(0, 180);
+}
+
+async function retrySchemaStatement<T>(operation: () => Promise<T>, retries = 3) {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= retries; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (attempt >= retries || !isTransientSchemaError(error)) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 120 * attempt));
+    }
+  }
+
+  throw lastError;
+}
+
+function isTransientSchemaError(error: unknown) {
+  return /1213|1205|deadlock|lock wait|write conflict|Transaction failed/i.test(errorMessage(error));
 }
 
 function errorMessage(error: unknown) {

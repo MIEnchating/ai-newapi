@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { Prisma, UpstreamStatus } from '@prisma/client';
 import { PrismaService } from '../prisma.service';
 import { SyncQueueService } from '../upstreams/sync-queue.service';
@@ -16,8 +16,8 @@ export class InspectionService {
   private schemaChecked = false;
 
   constructor(
-    private readonly prisma: PrismaService,
-    private readonly syncQueue: SyncQueueService
+    @Inject(PrismaService) private readonly prisma: PrismaService,
+    @Inject(SyncQueueService) private readonly syncQueue: SyncQueueService
   ) {}
 
   async status() {

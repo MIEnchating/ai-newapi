@@ -1,9 +1,9 @@
-import { Body, Controller, Get, Patch, Post } from '@nestjs/common';
+import { Body, Controller, Get, Inject, Patch, Post } from '@nestjs/common';
 import { MainStationService } from './main-station.service';
 
 @Controller('main-station')
 export class MainStationController {
-  constructor(private readonly mainStation: MainStationService) {}
+  constructor(@Inject(MainStationService) private readonly mainStation: MainStationService) {}
 
   @Get()
   get() {

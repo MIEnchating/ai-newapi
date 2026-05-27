@@ -11,7 +11,7 @@ export async function GET(request: Request) {
   try {
     return NextResponse.json(await listBackendMainStationGroups());
   } catch (error) {
-    return NextResponse.json({ groups: [], error: errorMessage(error) }, { status: 502 });
+    return NextResponse.json({ groups: [], error: errorMessage(error) });
   }
 }
 

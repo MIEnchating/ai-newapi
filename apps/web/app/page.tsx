@@ -13,12 +13,17 @@ import {
   FieldTimeOutlined,
   KeyOutlined,
   LockOutlined,
+  MenuFoldOutlined,
+  MenuUnfoldOutlined,
+  MoonOutlined,
   PlusOutlined,
   ReloadOutlined,
   RightOutlined,
   SearchOutlined,
   SettingOutlined,
-  ThunderboltOutlined
+  SunOutlined,
+  ThunderboltOutlined,
+  UserOutlined
 } from '@ant-design/icons';
 import {
   Alert,
@@ -56,13 +61,14 @@ import {
 import type { ColumnsType } from 'antd/es/table';
 import type { DefaultOptionType } from 'antd/es/select';
 import type { FormInstance } from 'antd/es/form';
-import type { MenuProps } from 'antd';
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import type { MenuProps, RefSelectProps } from 'antd';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 
 const { Header, Sider, Content } = Layout;
 const { Text, Title, Paragraph } = Typography;
 
 type View = 'overview' | 'channels' | 'rates' | 'credentials' | 'inspection' | 'cpaPool' | 'alerts';
+type ThemeMode = 'light' | 'dark';
 type RelayType = 'newapi';
 type UpstreamProvider = 'newapi' | 'sub2api' | 'cli_proxy';
 type ChannelFormUpstreamType = UpstreamProvider | 'unknown';
@@ -70,7 +76,9 @@ type StatusTone = 'ok' | 'warn' | 'limited' | 'error';
 type RateFilter = 'all' | 'changed' | 'limited';
 type ProviderFilter = 'all' | UpstreamProvider;
 type CredentialMode = 'server' | 'none';
+type GlobalSearchTarget = 'view' | 'channel' | 'rate' | 'credential';
 const MAIN_STATION_GROUP_ALL = '__all_main_station_groups__';
+const THEME_STORAGE_KEY = 'relaydesk.theme';
 
 type AuthStatus = {
   setupRequired: boolean;
@@ -483,8 +491,106 @@ function errorMessage(error: unknown) {
   return String(error);
 }
 
+function initialThemeMode(): ThemeMode {
+  if (typeof window === 'undefined') {
+    return 'dark';
+  }
+
+  const savedMode = window.localStorage.getItem(THEME_STORAGE_KEY);
+  if (savedMode === 'light' || savedMode === 'dark') {
+    return savedMode;
+  }
+
+  return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+}
+
+function buildAntTheme(mode: ThemeMode) {
+  const dark = mode === 'dark';
+
+  return {
+    algorithm: dark ? theme.darkAlgorithm : theme.defaultAlgorithm,
+    token: {
+      colorPrimary: '#0072f5',
+      colorInfo: '#0072f5',
+      colorLink: '#1677ff',
+      colorBgLayout: dark ? '#14161a' : '#f5f7fb',
+      colorBgContainer: dark ? '#1b1d23' : '#ffffff',
+      colorBgElevated: dark ? '#1f222a' : '#ffffff',
+      colorBorder: dark ? '#30333b' : '#e5e7eb',
+      colorText: dark ? '#f4f7fb' : '#111827',
+      colorTextSecondary: dark ? '#9ca3af' : '#64748b',
+      borderRadius: 8,
+      fontFamily:
+        'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
+    },
+    components: {
+      Button: {
+        borderRadius: 6,
+        controlHeight: 34,
+        primaryShadow: 'none'
+      },
+      Input: {
+        borderRadius: 6,
+        controlHeight: 34,
+        activeShadow: dark ? '0 0 0 2px rgba(0, 114, 245, 0.18)' : '0 0 0 2px rgba(0, 114, 245, 0.12)'
+      },
+      Select: {
+        borderRadius: 6,
+        controlHeight: 34,
+        optionSelectedBg: dark ? '#2a3340' : '#e8f3ff',
+        optionActiveBg: dark ? '#262a32' : '#f3f8ff'
+      },
+      Layout: {
+        bodyBg: dark ? '#14161a' : '#f5f7fb',
+        siderBg: dark ? '#1b1d23' : '#ffffff',
+        headerBg: dark ? '#1b1d23' : '#ffffff'
+      },
+      Card: {
+        borderRadiusLG: 8,
+        paddingLG: 18
+      },
+      Table: {
+        headerBg: dark ? '#2a2d34' : '#f8fafc',
+        headerColor: dark ? '#c7ccd4' : '#475569',
+        rowHoverBg: dark ? '#222832' : '#f8fbff',
+        cellPaddingBlock: 12,
+        cellPaddingInline: 14,
+        cellPaddingBlockSM: 10,
+        cellPaddingInlineSM: 12
+      },
+      Pagination: {
+        itemActiveBg: '#0072f5',
+        itemBg: dark ? '#1b1d23' : '#ffffff'
+      },
+      Modal: {
+        borderRadiusLG: 10,
+        titleFontSize: 16
+      },
+      Segmented: {
+        itemSelectedBg: dark ? '#303238' : '#ffffff',
+        trackBg: dark ? '#20232b' : '#f1f5f9'
+      },
+      Switch: {
+        colorPrimary: '#0072f5',
+        colorPrimaryHover: '#1677ff'
+      },
+      Form: {
+        itemMarginBottom: 18
+      },
+      Descriptions: {
+        itemPaddingBottom: 12
+      },
+      Tag: {
+        borderRadiusSM: 6
+      }
+    }
+  };
+}
+
 export default function DashboardPage() {
   const [activeView, setActiveView] = useState<View>('overview');
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => initialThemeMode());
   const [rateFilter, setRateFilter] = useState<RateFilter>('all');
   const [providerFilter, setProviderFilter] = useState<ProviderFilter>('all');
   const [groupChannels, setGroupChannels] = useState(true);
@@ -531,6 +637,8 @@ export default function DashboardPage() {
   const watchedUpstreamName = Form.useWatch('upstreamName', form);
   const watchedUpstreamType = Form.useWatch('upstreamType', form);
   const autoFilledSiteUrlRef = useRef('');
+  const globalSearchRef = useRef<RefSelectProps>(null);
+  const isDarkTheme = themeMode === 'dark';
 
   const selectedRelay = useMemo(() => relays[0] ?? initialRelays[0], [relays]);
   const normalizedSearch = search.trim().toLowerCase();
@@ -604,12 +712,35 @@ export default function DashboardPage() {
     });
   }, [normalizedSearch, rateFilter, rateRows]);
   const visibleRateGroups = useMemo(() => groupRateRowsByUpstream(visibleRates), [visibleRates]);
+  const visibleCredentialGroups = useMemo(() => {
+    if (!normalizedSearch) {
+      return credentialGroups;
+    }
+
+    return credentialGroups.filter((group) =>
+      [
+        group.name,
+        group.primary.upstreamName,
+        group.primary.upstreamBaseUrl,
+        group.authLabels.join(' '),
+        ...group.channels.flatMap((channel) => [
+          channel.id,
+          channel.name,
+          channel.group,
+          channel.mainStationGroup,
+          channel.keyName,
+          channel.status
+        ])
+      ].some((value) => String(value ?? '').toLowerCase().includes(normalizedSearch))
+    );
+  }, [credentialGroups, normalizedSearch]);
 
   const readableCount = activeChannels.filter((channel) => channel.enabled && canReadRateAndBalance(channel)).length;
   const cliProxyCount = activeChannels.filter((channel) => channel.upstreamType === 'cli_proxy').length;
   const limitedCount = activeChannels.filter(
     (channel) => channel.enabled && channel.upstreamType !== 'cli_proxy' && channel.statusTone === 'limited'
   ).length;
+  const warningEventCount = events.filter((event) => event.status === 'error' || event.status === 'warning').length;
   const pendingSyncCount = activeChannels.filter(
     (channel) =>
       channel.enabled &&
@@ -621,6 +752,11 @@ export default function DashboardPage() {
     window.localStorage.removeItem('relaydesk.localCredentials.v1');
     void loadAuthStatus();
   }, []);
+
+  useEffect(() => {
+    document.documentElement.dataset.relaydeskTheme = themeMode;
+    window.localStorage.setItem(THEME_STORAGE_KEY, themeMode);
+  }, [themeMode]);
 
   useEffect(() => {
     if (authStatus?.authenticated) {
@@ -692,15 +828,15 @@ export default function DashboardPage() {
       return;
     }
 
-    const relayPayload = (await relayResponse.json()) as { relays: RelayView[] };
-    const channelPayload = (await channelResponse.json()) as { channels: ChannelView[] };
-    const eventPayload = (await eventResponse.json()) as { events: EventItem[] };
-    const inspectionPayload = (await inspectionResponse.json()) as { inspection?: InspectionView };
-    const alertRulePayload = (await alertRuleResponse.json()) as { rules?: AlertRuleView[] };
+    const relayPayload = (await relayResponse.json().catch(() => ({}))) as { relays?: RelayView[]; error?: string };
+    const channelPayload = (await channelResponse.json().catch(() => ({}))) as { channels?: ChannelView[]; error?: string };
+    const eventPayload = (await eventResponse.json().catch(() => ({}))) as { events?: EventItem[]; error?: string };
+    const inspectionPayload = (await inspectionResponse.json().catch(() => ({}))) as { inspection?: InspectionView; error?: string };
+    const alertRulePayload = (await alertRuleResponse.json().catch(() => ({}))) as { rules?: AlertRuleView[]; error?: string };
 
-    setRelays(relayPayload.relays);
-    setChannels(channelPayload.channels);
-    setEvents(eventPayload.events);
+    setRelays(Array.isArray(relayPayload.relays) ? relayPayload.relays : initialRelays);
+    setChannels(Array.isArray(channelPayload.channels) ? channelPayload.channels : []);
+    setEvents(Array.isArray(eventPayload.events) ? eventPayload.events : []);
     setAlertRules(alertRulePayload.rules ?? []);
     if (inspectionPayload.inspection) {
       setInspection(inspectionPayload.inspection);
@@ -731,7 +867,11 @@ export default function DashboardPage() {
     setMainStationGroups([]);
   }
 
-  const menuItems: MenuProps['items'] = [
+  function toggleThemeMode() {
+    setThemeMode((current) => (current === 'dark' ? 'light' : 'dark'));
+  }
+
+  const navItems: Array<{ key: View; icon: ReactNode; label: string }> = [
     { key: 'overview', icon: <DashboardOutlined />, label: '总览' },
     { key: 'channels', icon: <CloudOutlined />, label: '渠道管理' },
     { key: 'rates', icon: <ThunderboltOutlined />, label: '倍率快照' },
@@ -740,6 +880,127 @@ export default function DashboardPage() {
     { key: 'cpaPool', icon: <DatabaseOutlined />, label: '号池管理' },
     { key: 'alerts', icon: <BellOutlined />, label: '告警' }
   ];
+  const menuItems: MenuProps['items'] = navItems.map((item) => ({
+    key: item.key,
+    icon: item.icon,
+    label: item.label
+  }));
+  const globalSearchOptions = useMemo<DefaultOptionType[]>(() => {
+    const keyword = search.trim().toLowerCase();
+    const options: DefaultOptionType[] = [];
+
+    const addOption = (
+      target: GlobalSearchTarget,
+      key: string,
+      title: string,
+      description: string,
+      tag: string,
+      keywords: Array<string | number | null | undefined> = []
+    ) => {
+      const haystack = [title, description, tag, ...keywords].join(' ').toLowerCase();
+      if (keyword && !haystack.includes(keyword)) {
+        return;
+      }
+
+      options.push({
+        value: `${target}:${key}`,
+        label: <SearchOption title={title} description={description} tag={tag} />
+      });
+    };
+
+    navItems.forEach((item) => addOption('view', item.key, item.label, viewDescription(item.key), '模块'));
+
+    if (keyword) {
+      activeChannels.forEach((channel) => {
+        addOption('channel', channel.id, channel.name, `${channel.id} / ${channel.upstreamName} / ${channel.status}`, '渠道', [
+          channel.group,
+          channel.mainStationGroup,
+          channel.upstreamBaseUrl,
+          upstreamProviderLabel(channel.upstreamType),
+          channel.keyName
+        ]);
+      });
+
+      rateRows.forEach((row) => {
+        addOption('rate', row.key, row.channelName, `${row.upstreamName} / ${row.input} -> ${row.output}`, '倍率', [
+          row.group,
+          row.relayName,
+          row.keyName,
+          upstreamProviderLabel(row.upstreamType)
+        ]);
+      });
+
+      credentialGroups.forEach((group) => {
+        addOption('credential', group.key, group.name, `${group.configuredCount}/${group.channels.length} 已配置凭证`, '凭证', [
+          group.primary.upstreamName,
+          group.primary.upstreamBaseUrl,
+          group.authLabels.join(' '),
+          ...group.channels.map((channel) => channel.name)
+        ]);
+      });
+    }
+
+    return options.slice(0, keyword ? 14 : navItems.length);
+  }, [activeChannels, credentialGroups, navItems, rateRows, search]);
+
+  useEffect(() => {
+    const focusGlobalSearch = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        globalSearchRef.current?.focus();
+      }
+    };
+
+    window.addEventListener('keydown', focusGlobalSearch);
+    return () => window.removeEventListener('keydown', focusGlobalSearch);
+  }, []);
+
+  function selectGlobalSearchTarget(rawValue: string | number | null | undefined) {
+    const value = String(rawValue ?? '');
+    const separatorIndex = value.indexOf(':');
+    if (separatorIndex < 0) {
+      return;
+    }
+
+    const target = value.slice(0, separatorIndex) as GlobalSearchTarget;
+    const key = value.slice(separatorIndex + 1);
+
+    if (target === 'view') {
+      setActiveView(key as View);
+      setSearch('');
+    }
+
+    if (target === 'channel') {
+      const channel = activeChannels.find((item) => item.id === key);
+      setActiveView('channels');
+      setSearch(channel?.name ?? key);
+    }
+
+    if (target === 'rate') {
+      const row = rateRows.find((item) => item.key === key);
+      setActiveView('rates');
+      setSearch(row?.channelName ?? key);
+    }
+
+    if (target === 'credential') {
+      const group = credentialGroups.find((item) => item.key === key);
+      setActiveView('credentials');
+      setSearch(group?.name ?? key);
+    }
+
+    requestAnimationFrame(() => globalSearchRef.current?.blur());
+  }
+
+  function handleGlobalSearchKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
+    if (event.key === 'Escape') {
+      setSearch('');
+      return;
+    }
+
+    if (event.key === 'Enter' && globalSearchOptions.length > 0) {
+      selectGlobalSearchTarget(globalSearchOptions[0].value);
+    }
+  }
 
   const channelColumns: ColumnsType<ChannelView> = [
     {
@@ -962,19 +1223,30 @@ export default function DashboardPage() {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ relayId: selectedRelay?.id })
       });
-      const payload = (await response.json()) as {
-        relays: RelayView[];
-        channels: ChannelView[];
-        events: EventItem[];
+      const payload = (await response.json().catch(() => ({}))) as {
+        relays?: RelayView[];
+        channels?: ChannelView[];
+        events?: EventItem[];
         inspection?: InspectionView;
+        error?: string;
       };
-      setRelays(payload.relays);
-      setChannels(payload.channels);
-      setEvents(payload.events);
+      if (!response.ok) {
+        messageApi.error(payload.error ?? '同步失败');
+        return;
+      }
+      if (payload.relays) {
+        setRelays(payload.relays);
+      }
+      if (payload.channels) {
+        setChannels(payload.channels);
+      }
+      if (payload.events) {
+        setEvents(payload.events);
+      }
       if (payload.inspection) {
         setInspection(payload.inspection);
       }
-      const latestEvent = payload.events[0];
+      const latestEvent = payload.events?.[0];
       if (latestEvent?.status === 'error') {
         messageApi.error(latestEvent.title);
       } else if (latestEvent?.status === 'warning') {
@@ -1484,7 +1756,7 @@ export default function DashboardPage() {
     if (auth && !authOptions(upstreamType).some((option) => option.value === auth)) {
       fieldErrors.push({ name: 'auth', errors: ['当前上游不支持此认证方式'] });
     }
-    if (upstreamType === 'newapi' && auth !== 'API Key' && !values.upstreamUserId?.trim()) {
+    if (needsNewApiUserId(upstreamType, auth) && !values.upstreamUserId?.trim()) {
       fieldErrors.push({ name: 'upstreamUserId', errors: ['请输入上游用户 ID'] });
     }
     if (!canUseExistingCredential && loginMode && !hasAccountPassword) {
@@ -1513,7 +1785,9 @@ export default function DashboardPage() {
       upstreamType: values.upstreamType,
       upstreamName,
       upstreamBaseUrl: values.upstreamBaseUrl?.trim(),
-      upstreamUserId: values.upstreamUserId?.trim() || existingTarget?.upstreamUserId,
+      upstreamUserId: needsNewApiUserId(values.upstreamType, values.auth)
+        ? values.upstreamUserId?.trim() || existingTarget?.upstreamUserId
+        : undefined,
       keyName,
       auth: values.auth,
       credential: values.credential?.trim(),
@@ -1662,7 +1936,7 @@ export default function DashboardPage() {
     if (values.auth && !authOptions(primary.upstreamType).some((option) => option.value === values.auth)) {
       fieldErrors.push({ name: 'auth', errors: ['当前上游不支持此认证方式'] });
     }
-    if (primary.upstreamType === 'newapi' && values.auth !== 'API Key' && !values.upstreamUserId?.trim()) {
+    if (needsNewApiUserId(primary.upstreamType, values.auth) && !values.upstreamUserId?.trim()) {
       fieldErrors.push({ name: 'upstreamUserId', errors: ['请输入上游用户 ID'] });
     }
     if (needsCredential && loginMode && !hasAccountPassword) {
@@ -1691,7 +1965,7 @@ export default function DashboardPage() {
       upstreamType: channel.upstreamType,
       upstreamName: channel.upstreamName,
       upstreamBaseUrl: channel.upstreamBaseUrl,
-      upstreamUserId: values.upstreamUserId?.trim() ?? '',
+      upstreamUserId: needsNewApiUserId(channel.upstreamType, values.auth) ? values.upstreamUserId?.trim() ?? '' : undefined,
       keyName: channel.keyName,
       auth: values.auth,
       credential: values.credential?.trim(),
@@ -1743,89 +2017,11 @@ export default function DashboardPage() {
       if (result.status === 'ok') {
         messageApi.success('凭证测试通过');
       } else {
-        messageApi.warning(result.message || '凭证可用，但余额或倍率不完整');
+        messageApi.warning(result.message || '凭证可用，但余额未获取');
       }
     } finally {
       setTestingCredential(false);
     }
-  }
-
-  async function loadCredentialGroupUpstreamGroups() {
-    const group = editingCredentialGroup;
-    if (!group) {
-      messageApi.error('平台分组不存在');
-      return;
-    }
-
-    const values = credentialForm.getFieldsValue();
-    const fieldErrors = credentialGroupFieldErrors(group, values, 'test');
-    if (fieldErrors.length > 0) {
-      credentialForm.setFields(fieldErrors);
-      return;
-    }
-
-    const hasNewCredential = Boolean(
-      values.credential?.trim() || (values.credentialAccount?.trim() && values.credentialPassword?.trim())
-    );
-    const target = hasNewCredential ? group.primary : group.channels.find((channel) => channel.credentialConfigured) ?? group.primary;
-
-    setLoadingUpstreamGroups(true);
-    try {
-      const response = await fetch('/api/channels/upstream-groups', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(credentialGroupPayload(group, values as PlatformCredentialForm, { target }))
-      });
-      const payload = (await response.json().catch(() => ({}))) as { groups?: UpstreamGroupInfo[]; error?: string };
-
-      if (!response.ok) {
-        messageApi.error(payload.error ?? '上游分组读取失败');
-        return;
-      }
-
-      setUpstreamGroups(payload.groups ?? []);
-      if (payload.groups?.length) {
-        messageApi.success(`读取到 ${payload.groups.length} 个上游分组`);
-      } else {
-        messageApi.warning('上游没有返回分组');
-      }
-    } finally {
-      setLoadingUpstreamGroups(false);
-    }
-  }
-
-  function openChannelModalFromUpstreamGroup(upstreamGroup: UpstreamGroupInfo) {
-    const group = editingCredentialGroup;
-    if (!group) {
-      messageApi.error('平台分组不存在');
-      return;
-    }
-
-    const values = credentialForm.getFieldsValue();
-    const primary = group.primary;
-    const keyName = upstreamGroup.remark?.trim() || upstreamGroup.name;
-
-    setCredentialModalOpen(false);
-    setEditingCredentialGroupKey(null);
-    setCredentialTestResult(null);
-    setUpstreamGroups([]);
-    credentialForm.resetFields();
-    form.resetFields();
-    form.setFieldsValue({
-      relayId: primary.relayId,
-      upstreamName: group.name,
-      upstreamBaseUrl: primary.upstreamBaseUrl,
-      upstreamType: primary.upstreamType,
-      auth: values.auth || primary.auth,
-      keyName,
-      group: upstreamGroup.name,
-      rechargeRatio: 1,
-      priority: primary.priority,
-      weight: primary.weight
-    });
-    setEditingChannelId(null);
-    setActiveView('channels');
-    setModalOpen(true);
   }
 
   async function saveCredentialGroup() {
@@ -1882,28 +2078,7 @@ export default function DashboardPage() {
 
   return (
     <ConfigProvider
-      theme={{
-        algorithm: theme.defaultAlgorithm,
-        token: {
-          colorPrimary: '#0f766e',
-          borderRadius: 6,
-          fontFamily:
-            'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
-        },
-        components: {
-          Layout: {
-            bodyBg: '#f6f8fb',
-            siderBg: '#ffffff',
-            headerBg: '#f6f8fb'
-          },
-          Card: {
-            borderRadiusLG: 8
-          },
-          Table: {
-            headerBg: '#f3f6f9'
-          }
-        }
-      }}
+      theme={buildAntTheme(themeMode)}
     >
       {contextHolder}
       {showSystemLoading ? (
@@ -1911,21 +2086,31 @@ export default function DashboardPage() {
       ) : !authStatus?.authenticated ? (
         <AuthScreen
           status={authStatus}
+          themeMode={themeMode}
+          onToggleTheme={toggleThemeMode}
           onAuthenticated={(username) => setAuthStatus({ setupRequired: false, authenticated: true, username })}
         />
       ) : (
         <>
-      <Layout className="app-shell">
-        <Sider width={248} className="app-sider">
+      <Layout className={`app-shell app-theme-${themeMode}`}>
+        <Sider
+          width={232}
+          collapsedWidth={72}
+          collapsed={sidebarCollapsed}
+          trigger={null}
+          collapsible
+          className={`app-sider ${sidebarCollapsed ? 'app-sider-collapsed' : ''}`}
+        >
           <div className="app-brand">
             <Avatar shape="square" size={36} icon={<ApiOutlined />} className="brand-avatar" />
             <div>
               <Text strong>RelayDesk</Text>
-              <Text type="secondary">NewAPI 中转管控</Text>
+              <Text type="secondary">Relay Console</Text>
             </div>
           </div>
 
           <Menu
+            theme={isDarkTheme ? 'dark' : 'light'}
             mode="inline"
             selectedKeys={[activeView]}
             items={menuItems}
@@ -1933,32 +2118,47 @@ export default function DashboardPage() {
             className="app-menu"
           />
 
-          <Card size="small" className="sider-note">
-            <Space align="start">
-              <LockOutlined />
-              <Text type="secondary">当前只管理一个 NewAPI 主站；渠道上游支持 NewAPI、Sub2API 和 CPA 号池。</Text>
-            </Space>
-          </Card>
+          <div className="sider-note">
+            <LockOutlined />
+            <span>NewAPI / Sub2API / CPA</span>
+          </div>
         </Sider>
 
         <Layout className="app-main">
           <Header className="app-header">
-            <div className="header-title">
-              <Text className="header-kicker">RelayDesk Workbench</Text>
-              <div className="header-title-row">
-                <Title level={3}>{viewTitle(activeView)}</Title>
-                {selectedRelay ? <StatusTag tone={selectedRelay.statusTone}>{selectedRelay.status}</StatusTag> : null}
+            <div className="header-left">
+              <Tooltip title={sidebarCollapsed ? '展开菜单' : '收起菜单'}>
+                <Button
+                  type="text"
+                  icon={sidebarCollapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+                  className="header-collapse"
+                  onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}
+                />
+              </Tooltip>
+              <div className="header-title">
+                <div className="header-breadcrumb">
+                  <span>首页</span>
+                  <span>/</span>
+                  <span>{viewTitle(activeView)}</span>
+                </div>
+                <div className="header-title-row">
+                  <Title level={4}>{viewTitle(activeView)}</Title>
+                  {selectedRelay ? <StatusTag tone={selectedRelay.statusTone}>{selectedRelay.status}</StatusTag> : null}
+                </div>
               </div>
-              <Text type="secondary">{viewDescription(activeView)}</Text>
             </div>
             <div className="header-actions">
-              <Input
-                prefix={<SearchOutlined />}
-                placeholder="搜索渠道、ID、上游、分组"
-                className="search-input"
+              <AutoComplete
+                ref={globalSearchRef}
+                className="global-search"
                 value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                allowClear
+                options={globalSearchOptions}
+                onChange={setSearch}
+                onSelect={selectGlobalSearchTarget}
+                onInputKeyDown={handleGlobalSearchKeyDown}
+                filterOption={false}
+                placeholder="搜索模块、渠道、上游、分组"
+                popupMatchSelectWidth={360}
               />
               <Select
                 className="main-station-group-filter"
@@ -1968,23 +2168,67 @@ export default function DashboardPage() {
                 optionFilterProp="label"
                 showSearch
               />
-              <Button icon={<BellOutlined />} onClick={() => setActiveView('alerts')} />
-              <Button icon={<LockOutlined />} onClick={logout}>
-                退出
+              <Tooltip title="告警中心">
+                <Badge count={warningEventCount} size="small" overflowCount={99}>
+                  <Button type="text" className="header-icon-action" icon={<BellOutlined />} onClick={() => setActiveView('alerts')} />
+                </Badge>
+              </Tooltip>
+              <Tooltip title={isDarkTheme ? '切换亮色' : '切换暗色'}>
+                <Button
+                  type="text"
+                  className="header-icon-action"
+                  aria-label={isDarkTheme ? '切换亮色' : '切换暗色'}
+                  icon={isDarkTheme ? <SunOutlined /> : <MoonOutlined />}
+                  onClick={toggleThemeMode}
+                />
+              </Tooltip>
+              <Tooltip title="退出登录">
+                <Button type="text" className="header-icon-action" icon={<LockOutlined />} onClick={logout} />
+              </Tooltip>
+              <div className="header-user">
+                <Avatar size={28} icon={<UserOutlined />} />
+                <span>{authStatus.username ?? 'admin'}</span>
+              </div>
+              <Button className="header-secondary-action" icon={<SettingOutlined />} onClick={() => openRelayModal()}>
+                主站
               </Button>
-              <Button icon={<SettingOutlined />} onClick={() => openRelayModal()}>
-                配置主站
+              <Button className="header-sync-action" icon={<ReloadOutlined spin={syncing} />} loading={syncing} onClick={runSync}>
+                同步
               </Button>
-              <Button type="primary" icon={<ReloadOutlined spin={syncing} />} onClick={runSync}>
-                同步渠道
-              </Button>
-              <Button icon={<PlusOutlined />} onClick={() => openChannelModal()}>
+              <Button type="primary" className="header-primary-action" icon={<PlusOutlined />} onClick={() => openChannelModal()}>
                 新增渠道
               </Button>
             </div>
           </Header>
 
+          <div className="app-tabbar">
+            {navItems.map((item) => (
+              <button
+                key={item.key}
+                type="button"
+                className={`app-tab ${item.key === activeView ? 'app-tab-active' : ''}`}
+                onClick={() => setActiveView(item.key)}
+              >
+                <span className="app-tab-dot" />
+                {item.label}
+              </button>
+            ))}
+          </div>
+
           <Content className="app-content">
+            <div className="content-hero">
+              <div>
+                <Text className="content-eyebrow">RelayDesk</Text>
+                <Title level={3}>{viewTitle(activeView)}</Title>
+                <Text type="secondary">{viewDescription(activeView)}</Text>
+              </div>
+              <Space size={8} wrap>
+                <Tag color="blue">控制台</Tag>
+                <Tag>{activeChannels.length} 渠道</Tag>
+                <Tag>{readableCount} 已同步</Tag>
+              </Space>
+            </div>
+
             {activeView === 'overview' ? (
               <OverviewView
                 selectedRelay={selectedRelay}
@@ -2068,7 +2312,7 @@ export default function DashboardPage() {
             ) : null}
 
             {activeView === 'credentials' ? (
-              <CredentialsView groups={credentialGroups} onEditGroup={openCredentialModal} />
+              <CredentialsView groups={visibleCredentialGroups} onEditGroup={openCredentialModal} />
             ) : null}
 
             {activeView === 'inspection' ? (
@@ -2150,7 +2394,8 @@ export default function DashboardPage() {
               form.setFieldsValue({
                 credential: undefined,
                 credentialAccount: '',
-                credentialPassword: ''
+                credentialPassword: '',
+                upstreamUserId: ''
               });
               if (changed.upstreamType === 'cli_proxy') {
                 form.setFieldsValue({
@@ -2171,7 +2416,8 @@ export default function DashboardPage() {
               form.setFieldsValue({
                 credential: undefined,
                 credentialAccount: '',
-                credentialPassword: ''
+                credentialPassword: '',
+                upstreamUserId: ''
               });
               return;
             }
@@ -2391,11 +2637,11 @@ export default function DashboardPage() {
                   <Form.Item name="auth" label="认证方式" rules={[{ required: true, message: '请选择认证方式' }]}>
                     <Select options={authOptions(type)} />
                   </Form.Item>
-                  {type === 'newapi' && auth !== 'API Key' ? (
+                  {needsNewApiUserId(type, auth) ? (
                     <Form.Item
                       name="upstreamUserId"
                       label="上游用户 ID"
-                      extra="NewAPI 账号密码、用户 Access Token 或管理 Token 读取余额和倍率时需要。"
+                      extra="NewAPI 用户 Access Token 或管理 Token 读取余额时需要；账号密码会登录后自动识别。"
                       rules={[{ required: true, message: '请输入上游用户 ID' }]}
                     >
                       <Input placeholder="例如 1" />
@@ -2537,19 +2783,18 @@ export default function DashboardPage() {
 
       <Modal
         title={
-          <ModalTitle
-            title="配置平台凭证"
-            description="只配置平台分组访问上游所需的认证信息；不会修改 Key、倍率分组、优先级或权重。"
-          />
+            <ModalTitle
+              title="配置平台凭证"
+              description="只配置平台分组访问上游所需的认证信息；不会修改渠道 Key、优先级或权重。"
+            />
         }
         open={credentialModalOpen}
-        className="channel-modal"
-        width={680}
+        className="credential-modal"
+        width={820}
         onCancel={() => {
           setCredentialModalOpen(false);
           setEditingCredentialGroupKey(null);
           setCredentialTestResult(null);
-          setUpstreamGroups([]);
           credentialForm.resetFields();
         }}
         footer={[
@@ -2557,7 +2802,6 @@ export default function DashboardPage() {
             setCredentialModalOpen(false);
             setEditingCredentialGroupKey(null);
             setCredentialTestResult(null);
-            setUpstreamGroups([]);
             credentialForm.resetFields();
           }}>
             取消
@@ -2577,17 +2821,17 @@ export default function DashboardPage() {
             layout="vertical"
             onValuesChange={(changed) => {
               setCredentialTestResult(null);
-              setUpstreamGroups([]);
               if ('auth' in changed) {
                 credentialForm.setFieldsValue({
                   credential: undefined,
                   credentialAccount: '',
-                  credentialPassword: ''
+                  credentialPassword: '',
+                  upstreamUserId: ''
                 });
               }
             }}
           >
-            <FormSection title="平台分组" description="同组渠道共用这一套凭证；渠道自己的 Key 和倍率分组保持不变。">
+            <FormSection title="平台分组" description="同组渠道共用这一套凭证；渠道自身配置保持不变。">
               <CredentialGroupSummary group={editingCredentialGroup} />
             </FormSection>
 
@@ -2597,11 +2841,11 @@ export default function DashboardPage() {
               </Form.Item>
               <Form.Item noStyle shouldUpdate={(prev, next) => prev.auth !== next.auth}>
                 {({ getFieldValue }) =>
-                  editingCredentialGroup.primary.upstreamType === 'newapi' && getFieldValue('auth') !== 'API Key' ? (
+                  needsNewApiUserId(editingCredentialGroup.primary.upstreamType, getFieldValue('auth')) ? (
                     <Form.Item
                       name="upstreamUserId"
                       label="上游用户 ID"
-                      extra="NewAPI 账号密码、用户 Access Token 或管理 Token 读取余额和倍率时需要。"
+                      extra="NewAPI 用户 Access Token 或管理 Token 读取余额时需要；账号密码会登录后自动识别。"
                       rules={[{ required: true, message: '请输入上游用户 ID' }]}
                     >
                       <Input placeholder="例如 1" />
@@ -2610,9 +2854,7 @@ export default function DashboardPage() {
                 }
               </Form.Item>
               <Form.Item noStyle shouldUpdate={(prev, next) => prev.auth !== next.auth}>
-                {({ getFieldValue }) => (
-                  <AuthHint type={editingCredentialGroup.primary.upstreamType} auth={getFieldValue('auth')} />
-                )}
+                {() => <CredentialAuthHint />}
               </Form.Item>
               <Form.Item noStyle shouldUpdate={(prev, next) => prev.auth !== next.auth}>
                 {({ getFieldValue }) => {
@@ -2671,13 +2913,7 @@ export default function DashboardPage() {
                   );
                 }}
               </Form.Item>
-              <CredentialTestPanel result={credentialTestResult} />
-              <UpstreamGroupsPanel
-                groups={upstreamGroups}
-                loading={loadingUpstreamGroups}
-                onFetch={loadCredentialGroupUpstreamGroups}
-                onAddChannel={openChannelModalFromUpstreamGroup}
-              />
+              <CredentialBalancePanel result={credentialTestResult} />
             </FormSection>
           </Form>
         ) : null}
@@ -2734,9 +2970,13 @@ export default function DashboardPage() {
 
 function AuthScreen({
   status,
+  themeMode,
+  onToggleTheme,
   onAuthenticated
 }: {
   status: AuthStatus | null;
+  themeMode: ThemeMode;
+  onToggleTheme: () => void;
   onAuthenticated: (username: string) => void;
 }) {
   const [form] = Form.useForm<LoginForm>();
@@ -2773,48 +3013,74 @@ function AuthScreen({
   }
 
   return (
-    <div className="auth-shell">
-      <Card className="auth-card">
-        <div className="auth-brand">
-          <Avatar shape="square" size={40} icon={<LockOutlined />} className="brand-avatar" />
+    <div className={`auth-shell app-theme-${themeMode}`}>
+      <div className="auth-theme-tools">
+        <Tooltip title={themeMode === 'dark' ? '切换亮色' : '切换暗色'}>
+          <Button
+            type="text"
+            shape="circle"
+            aria-label={themeMode === 'dark' ? '切换亮色' : '切换暗色'}
+            icon={themeMode === 'dark' ? <SunOutlined /> : <MoonOutlined />}
+            onClick={onToggleTheme}
+          />
+        </Tooltip>
+      </div>
+      <div className="auth-layout">
+        <aside className="auth-side">
+          <Avatar shape="square" size={42} icon={<ApiOutlined />} className="brand-avatar" />
+          <div>
+            <Text className="auth-side-kicker">RelayDesk Admin</Text>
+            <Title level={1}>NewAPI 中转管控台</Title>
+            <Paragraph>主站、渠道、凭证、自动巡检和告警集中在一个工作台里处理。</Paragraph>
+          </div>
+          <div className="auth-side-grid">
+            <span>Vben Layout</span>
+            <span>Shadcn Style</span>
+            <span>Dark Sidebar</span>
+          </div>
+        </aside>
+        <Card className="auth-card">
+          <div className="auth-brand">
+            <Avatar shape="square" size={40} icon={<LockOutlined />} className="brand-avatar" />
           <div>
             <Title level={3}>{setupRequired ? '设置登录密码' : '登录 RelayDesk'}</Title>
             <Text type="secondary">
               {setupRequired ? '密码只保存 PBKDF2 哈希，不保存明文。' : '登录后才能访问主站、渠道和凭证管理。'}
             </Text>
           </div>
-        </div>
-        {status?.error ? <Alert type="warning" showIcon title={status.error} /> : null}
-        <Form
-          form={form}
-          layout="vertical"
-          initialValues={{ username: status?.username ?? 'admin' }}
-          onFinish={submit}
-        >
-          <Form.Item name="username" label="账号" rules={[{ required: true, message: '请输入账号' }]}>
-            <Input autoComplete="username" />
-          </Form.Item>
-          <Form.Item
-            name="password"
-            label="密码"
-            rules={[{ required: true, message: '请输入密码' }]}
+          </div>
+          {status?.error ? <Alert type="warning" showIcon title={status.error} /> : null}
+          <Form
+            form={form}
+            layout="vertical"
+            initialValues={{ username: status?.username ?? 'admin' }}
+            onFinish={submit}
           >
-            <Input.Password autoComplete={setupRequired ? 'new-password' : 'current-password'} />
-          </Form.Item>
-          {setupRequired ? (
-            <Form.Item
-              name="confirmPassword"
-              label="确认密码"
-              rules={[{ required: true, message: '请再次输入密码' }]}
-            >
-              <Input.Password autoComplete="new-password" />
+            <Form.Item name="username" label="账号" rules={[{ required: true, message: '请输入账号' }]}>
+              <Input autoComplete="username" />
             </Form.Item>
-          ) : null}
-          <Button type="primary" htmlType="submit" block loading={busy}>
-            {setupRequired ? '保存并登录' : '登录'}
-          </Button>
-        </Form>
-      </Card>
+            <Form.Item
+              name="password"
+              label="密码"
+              rules={[{ required: true, message: '请输入密码' }]}
+            >
+              <Input.Password autoComplete={setupRequired ? 'new-password' : 'current-password'} />
+            </Form.Item>
+            {setupRequired ? (
+              <Form.Item
+                name="confirmPassword"
+                label="确认密码"
+                rules={[{ required: true, message: '请再次输入密码' }]}
+              >
+                <Input.Password autoComplete="new-password" />
+              </Form.Item>
+            ) : null}
+            <Button type="primary" htmlType="submit" block loading={busy}>
+              {setupRequired ? '保存并登录' : '登录'}
+            </Button>
+          </Form>
+        </Card>
+      </div>
     </div>
   );
 }
@@ -2867,25 +3133,25 @@ function OverviewView({
     <Flex vertical gap={16} className="full-width">
       <Row gutter={[16, 16]}>
         <Col xs={24} sm={12} xl={6}>
-          <Card>
+          <Card className="metric-card metric-card-blue">
             <Statistic title="主站" value={relayCount} prefix={<ApiOutlined />} suffix={<Text type="secondary">个</Text>} />
             <Text type="secondary">当前只管理一个 NewAPI 主站</Text>
           </Card>
         </Col>
         <Col xs={24} sm={12} xl={6}>
-          <Card>
+          <Card className="metric-card metric-card-green">
             <Statistic title="渠道" value={channelCount} prefix={<CloudOutlined />} suffix={<Text type="secondary">个</Text>} />
             <Text type="secondary">{readableCount} 个已获取倍率和余额</Text>
           </Card>
         </Col>
         <Col xs={24} sm={12} xl={6}>
-          <Card>
+          <Card className="metric-card metric-card-amber">
             <Statistic title="待同步渠道" value={pendingSyncCount} prefix={<FieldTimeOutlined />} />
             <Text type="secondary">新增或认证信息变更后需要同步</Text>
           </Card>
         </Col>
         <Col xs={24} sm={12} xl={6}>
-          <Card>
+          <Card className="metric-card metric-card-red">
             <Statistic title="受限渠道" value={limitedCount} prefix={<AlertOutlined />} />
             <Text type="secondary">API Key、CF Challenge；{cliProxyCount} 个仅转发</Text>
           </Card>
@@ -3986,6 +4252,22 @@ function CpaMetric({ label, value, tone = 'default' }: { label: string; value: s
   );
 }
 
+function SearchOption({ title, description, tag }: { title: string; description: string; tag: string }) {
+  return (
+    <div className="search-option">
+      <span className="search-option-copy">
+        <Text strong className="search-option-title">
+          {title}
+        </Text>
+        <Text type="secondary" className="search-option-desc">
+          {description}
+        </Text>
+      </span>
+      <Tag className="search-option-tag">{tag}</Tag>
+    </div>
+  );
+}
+
 function AlertsView({
   events,
   rules,
@@ -4060,7 +4342,7 @@ function AlertsView({
       )
     },
     {
-      title: '提醒方式',
+      title: '通知方式',
       key: 'notificationMethods',
       width: 190,
       render: (_, record) => (
@@ -4110,7 +4392,7 @@ function AlertsView({
           title={title}
           extra={
             <Space size={10} wrap>
-              <Text type="secondary">提醒方式为空时只进事件流</Text>
+              <Text type="secondary">通知方式为空时只进事件流</Text>
               <Text type="secondary">{rules.filter((rule) => rule.enabled).length}/{rules.length} 启用</Text>
             </Space>
           }
@@ -4355,6 +4637,41 @@ function CredentialTestPanel({ result }: { result: CredentialTestResult | null }
   );
 }
 
+function CredentialBalancePanel({ result }: { result: CredentialTestResult | null }) {
+  if (!result) {
+    return null;
+  }
+
+  const tone: StatusTone = result.status === 'ok' ? 'ok' : result.status === 'error' ? 'error' : 'warn';
+  const balance = result.balance === undefined ? '未获取' : formatAmount(result.balance);
+  const hasBalance = result.balance !== undefined;
+  const message =
+    result.status === 'ok'
+      ? !hasBalance
+        ? '凭证可用，余额未获取'
+        : '凭证可用，已读取余额'
+      : result.status === 'error'
+        ? result.message
+        : hasBalance
+          ? '凭证可用，已读取余额'
+          : '凭证可用，余额未获取';
+
+  return (
+    <div className="credential-test-panel">
+      <div className="credential-test-head">
+        <StatusTag tone={tone}>{result.status === 'error' ? '测试失败' : hasBalance ? '测试通过' : '余额未获取'}</StatusTag>
+        <Text type="secondary">{message}</Text>
+      </div>
+      <div className="credential-test-grid">
+        <span>
+          <Text type="secondary">余额</Text>
+          <Text strong>{balance}</Text>
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function UpstreamGroupsPanel({
   groups,
   loading,
@@ -4439,8 +4756,8 @@ function AuthHint({ type, auth, prefix, suffix }: { type?: ChannelFormUpstreamTy
 
   if (type === 'newapi') {
     text = auth === '用户登录'
-      ? 'NewAPI 账号密码会调用登录接口；遇到 Cloudflare/验证码时可改用用户 Access Token 或管理 Token。'
-      : 'NewAPI 用户 Access Token 或管理 Token 可读取余额和倍率；API Key 通常只能做受限监控。';
+      ? 'NewAPI 账号密码会调用登录接口，并自动使用登录用户读取余额和倍率；遇到 Cloudflare/验证码时可改用用户 Access Token 或管理 Token。'
+      : 'NewAPI 用户 Access Token 或管理 Token 需要上游用户 ID 才能读取余额和倍率；API Key 通常只能做受限监控。';
   }
 
   if (type === 'sub2api') {
@@ -4460,6 +4777,14 @@ function AuthHint({ type, auth, prefix, suffix }: { type?: ChannelFormUpstreamTy
   return (
     <div className="auth-hint">
       <Text type="secondary">{[prefix, text, suffix].filter(Boolean).join(' ')}</Text>
+    </div>
+  );
+}
+
+function CredentialAuthHint() {
+  return (
+    <div className="auth-hint">
+      <Text type="secondary">这里只保存平台凭证并做余额读取校验；渠道 Key、上游配置、优先级和权重不在这里修改。</Text>
     </div>
   );
 }
@@ -5347,6 +5672,10 @@ function normalizeAuthForType(type?: UpstreamProvider, auth?: string) {
   return auth && options.includes(auth) ? auth : defaultAuth(type);
 }
 
+function needsNewApiUserId(type?: ChannelFormUpstreamType, auth?: string) {
+  return type === 'newapi' && Boolean(auth) && auth !== '用户登录' && auth !== 'API Key';
+}
+
 function credentialFieldLabel(type?: UpstreamProvider, auth?: string) {
   if (type === 'newapi') {
     if (auth === '管理 Token') {
@@ -5504,17 +5833,17 @@ function balanceHint(channel: ChannelView) {
     }
 
     return channel.upstreamType === 'newapi'
-      ? 'NewAPI 的 sk-模型调用 Key 通常不能读取账号余额；请改用账号密码或用户 Access Token，并填写上游用户 ID。'
+      ? 'NewAPI 的 sk-模型调用 Key 通常不能读取账号余额；请改用账号密码，或改用用户 Access Token 并填写上游用户 ID。'
       : 'API Key 只能转发调用，不能读取账号余额。';
   }
 
   if (channel.status === '余额读取失败') {
-    return channel.rateSource || 'Token、账号密码或上游用户 ID 校验失败。';
+    return channel.rateSource || 'Token 或账号密码校验失败；Token 模式请同时确认上游用户 ID。';
   }
 
   if (channel.status === '余额不可见' || channel.status === '余额未获取') {
     return channel.upstreamType === 'newapi'
-      ? '已读到倍率，但 /api/user/self 没返回余额。请确认填写的是 NewAPI Token/账号密码和上游用户 ID。'
+      ? '已读到倍率，但 /api/user/self 没返回余额。账号密码模式不需要用户 ID；Token 模式请确认上游用户 ID。'
       : '已读到倍率，但 /api/v1/auth/me 没返回余额。请确认填写的是 Sub2API 用户 Token 或账号密码。';
   }
 

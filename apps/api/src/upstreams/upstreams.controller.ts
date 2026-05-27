@@ -1,9 +1,9 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Inject, Param, Patch, Post } from '@nestjs/common';
 import { UpstreamsService } from './upstreams.service';
 
 @Controller('upstreams')
 export class UpstreamsController {
-  constructor(private readonly upstreams: UpstreamsService) {}
+  constructor(@Inject(UpstreamsService) private readonly upstreams: UpstreamsService) {}
 
   @Get()
   list() {

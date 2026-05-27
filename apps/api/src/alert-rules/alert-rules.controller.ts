@@ -1,9 +1,9 @@
-import { Body, Controller, Get, Patch } from '@nestjs/common';
+import { Body, Controller, Get, Inject, Patch } from '@nestjs/common';
 import { AlertRulesService } from './alert-rules.service';
 
 @Controller('alert-rules')
 export class AlertRulesController {
-  constructor(private readonly alertRules: AlertRulesService) {}
+  constructor(@Inject(AlertRulesService) private readonly alertRules: AlertRulesService) {}
 
   @Get()
   list() {

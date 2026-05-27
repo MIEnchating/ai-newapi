@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Injectable, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Inject, Injectable, UnauthorizedException } from '@nestjs/common';
 import { createHash, pbkdf2Sync, randomBytes, timingSafeEqual } from 'crypto';
 import { PrismaService } from '../prisma.service';
 
@@ -26,7 +26,7 @@ type AdminSessionRow = {
 
 @Injectable()
 export class AuthService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
 
   async status(token?: string) {
     const userCount = await this.userCount();

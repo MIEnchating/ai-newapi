@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable } from '@nestjs/common';
 import { AlertRuleType, AlertSeverity, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma.service';
 
@@ -87,7 +87,7 @@ const defaultRules: Array<{
 export class AlertRulesService {
   private schemaChecked = false;
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
 
   async list() {
     await this.ensureDefaults();

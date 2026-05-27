@@ -27,7 +27,7 @@ export async function GET(request: Request) {
   }));
 
   if (!channel) {
-    return NextResponse.json({ error: '还没有 CPA 号池渠道，请先新增 CPA 类型渠道', channels: [] }, { status: 400 });
+    return NextResponse.json({ error: '还没有 CPA 号池渠道，请先新增 CPA 类型渠道', channels: [] });
   }
 
   const managementKey = store.channelSecrets[channel.id]?.credential?.trim();
@@ -45,7 +45,7 @@ export async function GET(request: Request) {
         channel: channelSummary(channel),
         channels: channelOptions,
         accounts: []
-      }, { status: 502 });
+      });
     }
   }
 
@@ -55,7 +55,7 @@ export async function GET(request: Request) {
       channel: channelSummary(channel),
       channels: channelOptions,
       accounts: []
-    }, { status: 400 });
+    });
   }
 
   const baseUrl = normalizeBaseUrl(channel.upstreamBaseUrl);
@@ -65,7 +65,12 @@ export async function GET(request: Request) {
   ]);
 
   if (authFilesResult.status === 'rejected') {
-    return NextResponse.json({ error: errorMessage(authFilesResult.reason) }, { status: 502 });
+    return NextResponse.json({
+      error: errorMessage(authFilesResult.reason),
+      channel: channelSummary(channel),
+      channels: channelOptions,
+      accounts: []
+    });
   }
 
   const now = new Date();
