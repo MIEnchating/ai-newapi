@@ -30,6 +30,7 @@ type ImportedChannel = {
   groupName: string;
   mainStationGroupName: string | null;
   platformGroupName: string;
+  keyName: string | null;
   type: UpstreamType;
   baseUrl: string;
   status: UpstreamStatus;
@@ -157,10 +158,16 @@ export class MainStationService {
                 : existing.status;
 
           const existingNameParts = existing ? splitChannelName(existing.name) : null;
+          const mainStationNameChanged = Boolean(existing && existing.name.trim() !== channel.name.trim());
           const shouldRefreshPlatformGroup =
             !existing?.upstreamName ||
+            mainStationNameChanged ||
             existing.upstreamName.trim() === existing.name.trim() ||
             existing.upstreamName.trim() === existingNameParts?.platformGroupName;
+          const shouldRefreshKeyName =
+            !existing?.keyName ||
+            mainStationNameChanged ||
+            Boolean(existingNameParts?.keyName && existing.keyName.trim() === existingNameParts.keyName);
           const shouldResetUnverifiedRateGroup =
             existing &&
             !existing.credential &&
@@ -178,6 +185,7 @@ export class MainStationService {
               groupName: channel.groupName,
               mainStationGroupName: channel.mainStationGroupName,
               upstreamName: channel.platformGroupName,
+              keyName: channel.keyName,
               status,
               rechargeRatio: 1,
               priority: channel.priority,
@@ -191,7 +199,8 @@ export class MainStationService {
               weight: channel.weight,
               mainStationGroupName: channel.mainStationGroupName,
               ...(shouldResetUnverifiedRateGroup ? { groupName: 'default' } : {}),
-              ...(shouldRefreshPlatformGroup ? { upstreamName: channel.platformGroupName } : {})
+              ...(shouldRefreshPlatformGroup ? { upstreamName: channel.platformGroupName } : {}),
+              ...(shouldRefreshKeyName ? { keyName: channel.keyName } : {})
             }
           });
         }
@@ -630,6 +639,7 @@ function toImportedChannel(record: Record<string, unknown>, index: number): Impo
     groupName: 'default',
     mainStationGroupName: stringValue(record.group) ?? firstGroup(record.groups) ?? null,
     platformGroupName: nameParts.platformGroupName,
+    keyName: nameParts.keyName,
     type: inferUpstreamType(name, baseUrl),
     baseUrl,
     status: enabled ? UpstreamStatus.LIMITED : UpstreamStatus.DISABLED,

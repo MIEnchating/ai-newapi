@@ -103,6 +103,21 @@ model Credential {
   upstream         Upstream @relation(fields: [upstreamId], references: [id], onDelete: Cascade)
 }
 
+model PasswordVaultEntry {
+  id               String    @id @default(cuid())
+  name             String
+  provider         String
+  baseUrl          String?
+  account          String
+  encryptedPayload String    @db.LongText
+  lastUsedAt       DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@index([provider])
+  @@index([account])
+}
+
 model RateSnapshot {
   id              String   @id @default(cuid())
   upstreamId      String

@@ -8,6 +8,7 @@ import {
   CloudOutlined,
   DashboardOutlined,
   DatabaseOutlined,
+  DeleteOutlined,
   DownOutlined,
   EditOutlined,
   FieldTimeOutlined,
@@ -34,7 +35,7 @@ import {
   Card,
   Col,
   ConfigProvider,
-  Descriptions,
+  Dropdown,
   Empty,
   Flex,
   Form,
@@ -44,12 +45,12 @@ import {
   Menu,
   Modal,
   message,
+  Popconfirm,
   Progress,
   Row,
   Segmented,
   Select,
   Space,
-  Statistic,
   Switch,
   Table,
   Tag,
@@ -61,8 +62,8 @@ import {
 import type { ColumnsType } from 'antd/es/table';
 import type { DefaultOptionType } from 'antd/es/select';
 import type { FormInstance } from 'antd/es/form';
-import type { MenuProps, RefSelectProps } from 'antd';
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
+import type { MenuProps } from 'antd';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 
 const { Header, Sider, Content } = Layout;
 const { Text, Title, Paragraph } = Typography;
@@ -76,7 +77,6 @@ type StatusTone = 'ok' | 'warn' | 'limited' | 'error';
 type RateFilter = 'all' | 'changed' | 'limited';
 type ProviderFilter = 'all' | UpstreamProvider;
 type CredentialMode = 'server' | 'none';
-type GlobalSearchTarget = 'view' | 'channel' | 'rate' | 'credential';
 const MAIN_STATION_GROUP_ALL = '__all_main_station_groups__';
 const THEME_STORAGE_KEY = 'relaydesk.theme';
 
@@ -325,6 +325,7 @@ type ChannelForm = {
   skipLatencyDisable?: boolean;
   auth: string;
   credential?: string;
+  passwordVaultId?: string;
   credentialAccount?: string;
   credentialPassword?: string;
   createMainStation?: boolean;
@@ -340,8 +341,24 @@ type PlatformCredentialForm = {
   auth: string;
   upstreamUserId?: string;
   credential?: string;
+  passwordVaultId?: string;
   credentialAccount?: string;
   credentialPassword?: string;
+};
+
+type PasswordVaultEntryView = {
+  id: string;
+  name: string;
+  provider: 'newapi' | 'sub2api';
+  baseUrl: string | null;
+  account: string;
+  lastUsedAt?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+type PasswordVaultEntryDetail = PasswordVaultEntryView & {
+  password: string;
 };
 
 type CredentialTestResult = {
@@ -618,8 +635,11 @@ export default function DashboardPage() {
   const [upstreamGroups, setUpstreamGroups] = useState<UpstreamGroupInfo[]>([]);
   const [mainStationGroups, setMainStationGroups] = useState<MainStationGroupInfo[]>([]);
   const [creatingMainStationGroup, setCreatingMainStationGroup] = useState(false);
+  const [passwordVaultEntries, setPasswordVaultEntries] = useState<PasswordVaultEntryView[]>([]);
+  const [passwordVaultLoading, setPasswordVaultLoading] = useState(false);
+  const [passwordVaultSaving, setPasswordVaultSaving] = useState(false);
+  const [deletingPasswordVaultId, setDeletingPasswordVaultId] = useState<string | null>(null);
   const [relayModalOpen, setRelayModalOpen] = useState(false);
-  const [search, setSearch] = useState('');
   const [mainStationGroupFilter, setMainStationGroupFilter] = useState(MAIN_STATION_GROUP_ALL);
   const [relays, setRelays] = useState(initialRelays);
   const [channels, setChannels] = useState(initialChannels);
@@ -637,11 +657,9 @@ export default function DashboardPage() {
   const watchedUpstreamName = Form.useWatch('upstreamName', form);
   const watchedUpstreamType = Form.useWatch('upstreamType', form);
   const autoFilledSiteUrlRef = useRef('');
-  const globalSearchRef = useRef<RefSelectProps>(null);
   const isDarkTheme = themeMode === 'dark';
 
   const selectedRelay = useMemo(() => relays[0] ?? initialRelays[0], [relays]);
-  const normalizedSearch = search.trim().toLowerCase();
   const activeChannels = useMemo(
     () => sortChannelsById(channels.filter((channel) => channel.relayId === selectedRelay.id)),
     [channels, selectedRelay.id]
@@ -661,24 +679,9 @@ export default function DashboardPage() {
       const matchesMainStationGroup =
         mainStationGroupFilter === MAIN_STATION_GROUP_ALL ||
         mainStationGroupLabel(channel) === mainStationGroupFilter;
-      const matchesSearch =
-        !normalizedSearch ||
-        [
-          channel.id,
-          channel.name,
-          channel.group,
-          channel.mainStationGroup,
-          channel.upstreamType,
-          upstreamProviderLabel(channel.upstreamType),
-          channel.upstreamName,
-          channel.upstreamBaseUrl,
-          channel.auth,
-          channel.status
-        ].some((value) => String(value ?? '').toLowerCase().includes(normalizedSearch));
-
-      return matchesProvider && matchesMainStationGroup && matchesSearch;
+      return matchesProvider && matchesMainStationGroup;
     });
-  }, [activeChannels, mainStationGroupFilter, normalizedSearch, providerFilter]);
+  }, [activeChannels, mainStationGroupFilter, providerFilter]);
   const visibleChannelGroups = useMemo(() => groupChannelsByPlatform(visibleChannels), [visibleChannels]);
   const credentialGroups = useMemo(() => buildCredentialGroups(activeChannels), [activeChannels]);
   const mainStationGroupOptions = useMemo(
@@ -700,40 +703,9 @@ export default function DashboardPage() {
   );
 
   const rateRows = useMemo(() => buildRateRows(activeChannels, relays), [activeChannels, relays]);
-  const visibleRates = useMemo(() => {
-    return filterRateRows(rateRows, rateFilter).filter((row) => {
-      if (!normalizedSearch) {
-        return true;
-      }
-
-      return [row.relayName, row.channelName, row.upstreamName, row.upstreamType, row.keyName, row.group].some((value) =>
-        value.toLowerCase().includes(normalizedSearch)
-      );
-    });
-  }, [normalizedSearch, rateFilter, rateRows]);
+  const visibleRates = useMemo(() => filterRateRows(rateRows, rateFilter), [rateFilter, rateRows]);
   const visibleRateGroups = useMemo(() => groupRateRowsByUpstream(visibleRates), [visibleRates]);
-  const visibleCredentialGroups = useMemo(() => {
-    if (!normalizedSearch) {
-      return credentialGroups;
-    }
-
-    return credentialGroups.filter((group) =>
-      [
-        group.name,
-        group.primary.upstreamName,
-        group.primary.upstreamBaseUrl,
-        group.authLabels.join(' '),
-        ...group.channels.flatMap((channel) => [
-          channel.id,
-          channel.name,
-          channel.group,
-          channel.mainStationGroup,
-          channel.keyName,
-          channel.status
-        ])
-      ].some((value) => String(value ?? '').toLowerCase().includes(normalizedSearch))
-    );
-  }, [credentialGroups, normalizedSearch]);
+  const visibleCredentialGroups = credentialGroups;
 
   const readableCount = activeChannels.filter((channel) => channel.enabled && canReadRateAndBalance(channel)).length;
   const cliProxyCount = activeChannels.filter((channel) => channel.upstreamType === 'cli_proxy').length;
@@ -815,15 +787,16 @@ export default function DashboardPage() {
   }
 
   async function loadDashboard() {
-    const [relayResponse, channelResponse, eventResponse, inspectionResponse, alertRuleResponse] = await Promise.all([
+    const [relayResponse, channelResponse, eventResponse, inspectionResponse, alertRuleResponse, passwordVaultResponse] = await Promise.all([
       fetch('/api/relays', { cache: 'no-store' }),
       fetch('/api/channels', { cache: 'no-store' }),
       fetch('/api/events', { cache: 'no-store' }),
       fetch('/api/inspection', { cache: 'no-store' }),
-      fetch('/api/alert-rules', { cache: 'no-store' })
+      fetch('/api/alert-rules', { cache: 'no-store' }),
+      fetch('/api/password-vault', { cache: 'no-store' })
     ]);
 
-    if ([relayResponse, channelResponse, eventResponse, inspectionResponse, alertRuleResponse].some((response) => response.status === 401)) {
+    if ([relayResponse, channelResponse, eventResponse, inspectionResponse, alertRuleResponse, passwordVaultResponse].some((response) => response.status === 401)) {
       setAuthStatus({ setupRequired: false, authenticated: false });
       return;
     }
@@ -833,11 +806,13 @@ export default function DashboardPage() {
     const eventPayload = (await eventResponse.json().catch(() => ({}))) as { events?: EventItem[]; error?: string };
     const inspectionPayload = (await inspectionResponse.json().catch(() => ({}))) as { inspection?: InspectionView; error?: string };
     const alertRulePayload = (await alertRuleResponse.json().catch(() => ({}))) as { rules?: AlertRuleView[]; error?: string };
+    const passwordVaultPayload = (await passwordVaultResponse.json().catch(() => ({}))) as { entries?: PasswordVaultEntryView[]; error?: string };
 
     setRelays(Array.isArray(relayPayload.relays) ? relayPayload.relays : initialRelays);
     setChannels(Array.isArray(channelPayload.channels) ? channelPayload.channels : []);
     setEvents(Array.isArray(eventPayload.events) ? eventPayload.events : []);
     setAlertRules(alertRulePayload.rules ?? []);
+    setPasswordVaultEntries(passwordVaultPayload.entries ?? []);
     if (inspectionPayload.inspection) {
       setInspection(inspectionPayload.inspection);
     }
@@ -855,6 +830,131 @@ export default function DashboardPage() {
     setMainStationGroups(payload.groups ?? []);
   }
 
+  async function loadPasswordVault() {
+    setPasswordVaultLoading(true);
+    try {
+      const response = await fetch('/api/password-vault', { cache: 'no-store' });
+      const payload = (await response.json().catch(() => ({}))) as { entries?: PasswordVaultEntryView[]; error?: string };
+
+      if (!response.ok) {
+        messageApi.error(payload.error ?? '密码箱加载失败');
+        return;
+      }
+
+      setPasswordVaultEntries(payload.entries ?? []);
+    } finally {
+      setPasswordVaultLoading(false);
+    }
+  }
+
+  async function applyPasswordVaultEntry(entryId: string | undefined, target: 'channel' | 'credential') {
+    if (!entryId) {
+      return;
+    }
+
+    const response = await fetch(`/api/password-vault?id=${encodeURIComponent(entryId)}&reveal=1`, { cache: 'no-store' });
+    const payload = (await response.json().catch(() => ({}))) as PasswordVaultEntryDetail & { error?: string };
+
+    if (!response.ok || !payload.password) {
+      messageApi.error(payload.error ?? '密码箱账号读取失败');
+      return;
+    }
+
+    const fields = {
+      passwordVaultId: payload.id,
+      credentialAccount: payload.account,
+      credentialPassword: payload.password
+    };
+
+    if (target === 'channel') {
+      form.setFieldsValue(fields);
+    } else {
+      credentialForm.setFieldsValue(fields);
+    }
+
+    messageApi.success(`已填入密码箱账号：${payload.account}`);
+    void loadPasswordVault();
+  }
+
+  async function savePasswordVaultFromForm(
+    target: 'channel' | 'credential',
+    provider: 'newapi' | 'sub2api',
+    options: { baseUrl?: string; name?: string } = {}
+  ) {
+    const values = target === 'channel' ? form.getFieldsValue() : credentialForm.getFieldsValue();
+    const id = values.passwordVaultId?.trim();
+    const account = values.credentialAccount?.trim();
+    const password = values.credentialPassword?.trim();
+
+    if (!account || !password) {
+      const fieldErrors = [
+        !account ? { name: 'credentialAccount' as const, errors: ['请输入账号或邮箱'] } : null,
+        !password ? { name: 'credentialPassword' as const, errors: ['请输入密码'] } : null
+      ].filter((item): item is { name: 'credentialAccount' | 'credentialPassword'; errors: string[] } => Boolean(item));
+
+      if (target === 'channel') {
+        form.setFields(fieldErrors);
+      } else {
+        credentialForm.setFields(fieldErrors);
+      }
+      return;
+    }
+
+    setPasswordVaultSaving(true);
+    try {
+      const response = await fetch('/api/password-vault', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          id,
+          name: options.name?.trim() || account,
+          provider,
+          baseUrl: options.baseUrl?.trim(),
+          account,
+          password
+        })
+      });
+      const payload = (await response.json().catch(() => ({}))) as {
+        entry?: PasswordVaultEntryView;
+        entries?: PasswordVaultEntryView[];
+        error?: string;
+      };
+
+      if (!response.ok || !payload.entry) {
+        messageApi.error(payload.error ?? '保存到密码箱失败');
+        return;
+      }
+
+      setPasswordVaultEntries(payload.entries ?? [payload.entry, ...passwordVaultEntries.filter((entry) => entry.id !== payload.entry?.id)]);
+      if (target === 'channel') {
+        form.setFieldValue('passwordVaultId', payload.entry.id);
+      } else {
+        credentialForm.setFieldValue('passwordVaultId', payload.entry.id);
+      }
+      messageApi.success('已保存到密码箱');
+    } finally {
+      setPasswordVaultSaving(false);
+    }
+  }
+
+  async function deletePasswordVaultEntry(id: string) {
+    setDeletingPasswordVaultId(id);
+    try {
+      const response = await fetch(`/api/password-vault?id=${encodeURIComponent(id)}`, { method: 'DELETE' });
+      const payload = (await response.json().catch(() => ({}))) as { entries?: PasswordVaultEntryView[]; error?: string };
+
+      if (!response.ok) {
+        messageApi.error(payload.error ?? '删除密码箱账号失败');
+        return;
+      }
+
+      setPasswordVaultEntries(payload.entries ?? passwordVaultEntries.filter((entry) => entry.id !== id));
+      messageApi.success('密码箱账号已删除');
+    } finally {
+      setDeletingPasswordVaultId(null);
+    }
+  }
+
   async function logout() {
     await fetch('/api/auth/logout', { method: 'POST' });
     setAuthStatus({ setupRequired: false, authenticated: false });
@@ -863,6 +963,7 @@ export default function DashboardPage() {
     setChannels(initialChannels);
     setEvents(initialEvents);
     setAlertRules(initialAlertRules);
+    setPasswordVaultEntries([]);
     setCpaPool(initialCpaPool);
     setMainStationGroups([]);
   }
@@ -885,122 +986,14 @@ export default function DashboardPage() {
     icon: item.icon,
     label: item.label
   }));
-  const globalSearchOptions = useMemo<DefaultOptionType[]>(() => {
-    const keyword = search.trim().toLowerCase();
-    const options: DefaultOptionType[] = [];
-
-    const addOption = (
-      target: GlobalSearchTarget,
-      key: string,
-      title: string,
-      description: string,
-      tag: string,
-      keywords: Array<string | number | null | undefined> = []
-    ) => {
-      const haystack = [title, description, tag, ...keywords].join(' ').toLowerCase();
-      if (keyword && !haystack.includes(keyword)) {
-        return;
+  const userMenu: MenuProps = {
+    items: [{ key: 'logout', icon: <LockOutlined />, label: '退出登录', danger: true }],
+    onClick: ({ key }) => {
+      if (key === 'logout') {
+        void logout();
       }
-
-      options.push({
-        value: `${target}:${key}`,
-        label: <SearchOption title={title} description={description} tag={tag} />
-      });
-    };
-
-    navItems.forEach((item) => addOption('view', item.key, item.label, viewDescription(item.key), '模块'));
-
-    if (keyword) {
-      activeChannels.forEach((channel) => {
-        addOption('channel', channel.id, channel.name, `${channel.id} / ${channel.upstreamName} / ${channel.status}`, '渠道', [
-          channel.group,
-          channel.mainStationGroup,
-          channel.upstreamBaseUrl,
-          upstreamProviderLabel(channel.upstreamType),
-          channel.keyName
-        ]);
-      });
-
-      rateRows.forEach((row) => {
-        addOption('rate', row.key, row.channelName, `${row.upstreamName} / ${row.input} -> ${row.output}`, '倍率', [
-          row.group,
-          row.relayName,
-          row.keyName,
-          upstreamProviderLabel(row.upstreamType)
-        ]);
-      });
-
-      credentialGroups.forEach((group) => {
-        addOption('credential', group.key, group.name, `${group.configuredCount}/${group.channels.length} 已配置凭证`, '凭证', [
-          group.primary.upstreamName,
-          group.primary.upstreamBaseUrl,
-          group.authLabels.join(' '),
-          ...group.channels.map((channel) => channel.name)
-        ]);
-      });
     }
-
-    return options.slice(0, keyword ? 14 : navItems.length);
-  }, [activeChannels, credentialGroups, navItems, rateRows, search]);
-
-  useEffect(() => {
-    const focusGlobalSearch = (event: KeyboardEvent) => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
-        event.preventDefault();
-        globalSearchRef.current?.focus();
-      }
-    };
-
-    window.addEventListener('keydown', focusGlobalSearch);
-    return () => window.removeEventListener('keydown', focusGlobalSearch);
-  }, []);
-
-  function selectGlobalSearchTarget(rawValue: string | number | null | undefined) {
-    const value = String(rawValue ?? '');
-    const separatorIndex = value.indexOf(':');
-    if (separatorIndex < 0) {
-      return;
-    }
-
-    const target = value.slice(0, separatorIndex) as GlobalSearchTarget;
-    const key = value.slice(separatorIndex + 1);
-
-    if (target === 'view') {
-      setActiveView(key as View);
-      setSearch('');
-    }
-
-    if (target === 'channel') {
-      const channel = activeChannels.find((item) => item.id === key);
-      setActiveView('channels');
-      setSearch(channel?.name ?? key);
-    }
-
-    if (target === 'rate') {
-      const row = rateRows.find((item) => item.key === key);
-      setActiveView('rates');
-      setSearch(row?.channelName ?? key);
-    }
-
-    if (target === 'credential') {
-      const group = credentialGroups.find((item) => item.key === key);
-      setActiveView('credentials');
-      setSearch(group?.name ?? key);
-    }
-
-    requestAnimationFrame(() => globalSearchRef.current?.blur());
-  }
-
-  function handleGlobalSearchKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
-    if (event.key === 'Escape') {
-      setSearch('');
-      return;
-    }
-
-    if (event.key === 'Enter' && globalSearchOptions.length > 0) {
-      selectGlobalSearchTarget(globalSearchOptions[0].value);
-    }
-  }
+  };
 
   const channelColumns: ColumnsType<ChannelView> = [
     {
@@ -1426,6 +1419,7 @@ export default function DashboardPage() {
       skipLatencyDisable: channel?.skipLatencyDisable ?? false,
       auth: normalizeAuthForType(channel?.upstreamType, channel?.auth),
       credential: undefined,
+      passwordVaultId: undefined,
       credentialAccount: '',
       credentialPassword: '',
       createMainStation: !channel,
@@ -1450,6 +1444,7 @@ export default function DashboardPage() {
       auth: normalizeAuthForType(primary.upstreamType, baseline.auth),
       upstreamUserId: baseline.upstreamUserId ?? primary.upstreamUserId ?? '',
       credential: undefined,
+      passwordVaultId: undefined,
       credentialAccount: '',
       credentialPassword: ''
     });
@@ -2117,11 +2112,6 @@ export default function DashboardPage() {
             onClick={({ key }) => setActiveView(key as View)}
             className="app-menu"
           />
-
-          <div className="sider-note">
-            <LockOutlined />
-            <span>NewAPI / Sub2API / CPA</span>
-          </div>
         </Sider>
 
         <Layout className="app-main">
@@ -2148,72 +2138,52 @@ export default function DashboardPage() {
               </div>
             </div>
             <div className="header-actions">
-              <AutoComplete
-                ref={globalSearchRef}
-                className="global-search"
-                value={search}
-                options={globalSearchOptions}
-                onChange={setSearch}
-                onSelect={selectGlobalSearchTarget}
-                onInputKeyDown={handleGlobalSearchKeyDown}
-                filterOption={false}
-                placeholder="搜索模块、渠道、上游、分组"
-                popupMatchSelectWidth={360}
-              />
-              <Select
-                className="main-station-group-filter"
-                value={mainStationGroupFilter}
-                options={mainStationGroupFilterOptions}
-                onChange={setMainStationGroupFilter}
-                optionFilterProp="label"
-                showSearch
-              />
-              <Tooltip title="告警中心">
-                <Badge count={warningEventCount} size="small" overflowCount={99}>
-                  <Button type="text" className="header-icon-action" icon={<BellOutlined />} onClick={() => setActiveView('alerts')} />
-                </Badge>
-              </Tooltip>
-              <Tooltip title={isDarkTheme ? '切换亮色' : '切换暗色'}>
-                <Button
-                  type="text"
-                  className="header-icon-action"
-                  aria-label={isDarkTheme ? '切换亮色' : '切换暗色'}
-                  icon={isDarkTheme ? <SunOutlined /> : <MoonOutlined />}
-                  onClick={toggleThemeMode}
+              <div className="header-filter-group">
+                <Select
+                  className="main-station-group-filter"
+                  value={mainStationGroupFilter}
+                  options={mainStationGroupFilterOptions}
+                  onChange={setMainStationGroupFilter}
+                  optionFilterProp="label"
+                  showSearch
                 />
-              </Tooltip>
-              <Tooltip title="退出登录">
-                <Button type="text" className="header-icon-action" icon={<LockOutlined />} onClick={logout} />
-              </Tooltip>
-              <div className="header-user">
-                <Avatar size={28} icon={<UserOutlined />} />
-                <span>{authStatus.username ?? 'admin'}</span>
               </div>
-              <Button className="header-secondary-action" icon={<SettingOutlined />} onClick={() => openRelayModal()}>
-                主站
-              </Button>
-              <Button className="header-sync-action" icon={<ReloadOutlined spin={syncing} />} loading={syncing} onClick={runSync}>
-                同步
-              </Button>
-              <Button type="primary" className="header-primary-action" icon={<PlusOutlined />} onClick={() => openChannelModal()}>
-                新增渠道
-              </Button>
+              <div className="header-utility-group">
+                <Tooltip title="告警中心">
+                  <Badge count={warningEventCount} size="small" overflowCount={99}>
+                    <Button type="text" className="header-icon-action" icon={<BellOutlined />} onClick={() => setActiveView('alerts')} />
+                  </Badge>
+                </Tooltip>
+                <Tooltip title={isDarkTheme ? '切换亮色' : '切换暗色'}>
+                  <Button
+                    type="text"
+                    className="header-icon-action"
+                    aria-label={isDarkTheme ? '切换亮色' : '切换暗色'}
+                    icon={isDarkTheme ? <SunOutlined /> : <MoonOutlined />}
+                    onClick={toggleThemeMode}
+                  />
+                </Tooltip>
+                <Dropdown menu={userMenu} placement="bottomRight" trigger={['click']}>
+                  <button type="button" className="header-user" aria-label="用户菜单">
+                    <Avatar size={26} icon={<UserOutlined />} />
+                    <span>{authStatus.username ?? 'admin'}</span>
+                    <DownOutlined className="header-user-chevron" />
+                  </button>
+                </Dropdown>
+              </div>
+              <div className="header-command-group">
+                <Tooltip title="主站配置">
+                  <Button className="header-secondary-action" aria-label="主站配置" icon={<SettingOutlined />} onClick={() => openRelayModal()} />
+                </Tooltip>
+                <Tooltip title="同步渠道">
+                  <Button className="header-sync-action" aria-label="同步渠道" icon={<ReloadOutlined spin={syncing} />} loading={syncing} onClick={runSync} />
+                </Tooltip>
+                <Button type="primary" className="header-primary-action" icon={<PlusOutlined />} onClick={() => openChannelModal()}>
+                  新增渠道
+                </Button>
+              </div>
             </div>
           </Header>
-
-          <div className="app-tabbar">
-            {navItems.map((item) => (
-              <button
-                key={item.key}
-                type="button"
-                className={`app-tab ${item.key === activeView ? 'app-tab-active' : ''}`}
-                onClick={() => setActiveView(item.key)}
-              >
-                <span className="app-tab-dot" />
-                {item.label}
-              </button>
-            ))}
-          </div>
 
           <Content className="app-content">
             <div className="content-hero">
@@ -2251,8 +2221,8 @@ export default function DashboardPage() {
                   title={
                     <div className="table-card-header">
                       <div className="table-card-title">
-                        <Text strong>{selectedRelay?.name ?? 'NewAPI 主站'}</Text>
-                        <Text type="secondary">NewAPI / Sub2API / CPA 号池都会保存到 MySQL；敏感信息加密存储。</Text>
+                        <Text strong>{selectedRelay?.name ?? '主站'}</Text>
+                        <Text type="secondary">渠道配置保存到 MySQL；敏感信息加密存储。</Text>
                       </div>
                     </div>
                   }
@@ -2312,7 +2282,15 @@ export default function DashboardPage() {
             ) : null}
 
             {activeView === 'credentials' ? (
-              <CredentialsView groups={visibleCredentialGroups} onEditGroup={openCredentialModal} />
+              <CredentialsView
+                groups={visibleCredentialGroups}
+                passwordVaultEntries={passwordVaultEntries}
+                passwordVaultLoading={passwordVaultLoading}
+                deletingPasswordVaultId={deletingPasswordVaultId}
+                onEditGroup={openCredentialModal}
+                onReloadPasswordVault={loadPasswordVault}
+                onDeletePasswordVault={deletePasswordVaultEntry}
+              />
             ) : null}
 
             {activeView === 'inspection' ? (
@@ -2393,6 +2371,7 @@ export default function DashboardPage() {
               form.setFieldValue('auth', isKnownUpstreamType(changed.upstreamType) ? defaultAuth(changed.upstreamType) : undefined);
               form.setFieldsValue({
                 credential: undefined,
+                passwordVaultId: undefined,
                 credentialAccount: '',
                 credentialPassword: '',
                 upstreamUserId: ''
@@ -2415,6 +2394,7 @@ export default function DashboardPage() {
               setUpstreamGroups([]);
               form.setFieldsValue({
                 credential: undefined,
+                passwordVaultId: undefined,
                 credentialAccount: '',
                 credentialPassword: '',
                 upstreamUserId: ''
@@ -2436,7 +2416,8 @@ export default function DashboardPage() {
               setUpstreamGroups([]);
               form.setFieldsValue({
                 upstreamType: 'unknown',
-                auth: undefined
+                auth: undefined,
+                passwordVaultId: undefined
               });
             }
 
@@ -2649,18 +2630,20 @@ export default function DashboardPage() {
                   ) : null}
                   <AuthHint type={type} auth={auth} />
                   {(type === 'newapi' || type === 'sub2api') && auth === '用户登录' ? (
-                    <Row gutter={12}>
-                      <Col xs={24} md={12}>
-                        <Form.Item name="credentialAccount" label="账号 / 邮箱" extra="仅用于识别和保存平台凭证，不在页面回显。">
-                          <Input placeholder="例如 user@example.com" autoComplete="username" />
-                        </Form.Item>
-                      </Col>
-                      <Col xs={24} md={12}>
-                        <Form.Item name="credentialPassword" label="密码" extra="保存后服务端加密存储。">
-                          <Input.Password placeholder="请输入密码" autoComplete="current-password" />
-                        </Form.Item>
-                      </Col>
-                    </Row>
+                    <PasswordVaultLoginFields
+                      entries={passwordVaultEntries}
+                      provider={type}
+                      baseUrl={getFieldValue('upstreamBaseUrl')}
+                      extra="仅用于识别和保存平台凭证，不在页面回显。"
+                      saving={passwordVaultSaving}
+                      onSelect={(entryId) => applyPasswordVaultEntry(entryId, 'channel')}
+                      onSave={() =>
+                        savePasswordVaultFromForm('channel', type, {
+                          baseUrl: getFieldValue('upstreamBaseUrl'),
+                          name: `${getFieldValue('upstreamName') || getFieldValue('name') || upstreamProviderLabel(type)}`
+                        })
+                      }
+                    />
                   ) : auth === '无鉴权' ? null : (
                     <Form.Item
                       name="credential"
@@ -2824,6 +2807,7 @@ export default function DashboardPage() {
               if ('auth' in changed) {
                 credentialForm.setFieldsValue({
                   credential: undefined,
+                  passwordVaultId: undefined,
                   credentialAccount: '',
                   credentialPassword: '',
                   upstreamUserId: ''
@@ -2869,28 +2853,21 @@ export default function DashboardPage() {
 
                   if ((type === 'newapi' || type === 'sub2api') && auth === '用户登录') {
                     return (
-                      <Row gutter={12}>
-                        <Col xs={24} md={12}>
-                          <Form.Item
-                            name="credentialAccount"
-                            label="账号 / 邮箱"
-                            extra={extra}
-                            rules={[{ required, message: '请输入账号或邮箱' }]}
-                          >
-                            <Input placeholder="例如 user@example.com" autoComplete="username" />
-                          </Form.Item>
-                        </Col>
-                        <Col xs={24} md={12}>
-                          <Form.Item
-                            name="credentialPassword"
-                            label="密码"
-                            extra={extra}
-                            rules={[{ required, message: '请输入密码' }]}
-                          >
-                            <Input.Password placeholder="请输入密码" autoComplete="current-password" />
-                          </Form.Item>
-                        </Col>
-                      </Row>
+                      <PasswordVaultLoginFields
+                        entries={passwordVaultEntries}
+                        provider={type}
+                        baseUrl={editingCredentialGroup.primary.upstreamBaseUrl}
+                        required={required}
+                        extra={extra}
+                        saving={passwordVaultSaving}
+                        onSelect={(entryId) => applyPasswordVaultEntry(entryId, 'credential')}
+                        onSave={() =>
+                          savePasswordVaultFromForm('credential', type, {
+                            baseUrl: editingCredentialGroup.primary.upstreamBaseUrl,
+                            name: `${editingCredentialGroup.name}`
+                          })
+                        }
+                      />
                     );
                   }
 
@@ -3104,6 +3081,45 @@ function SystemLoadingScreen({ detail }: { detail: string }) {
   );
 }
 
+function MetricCard({
+  tone,
+  icon,
+  label,
+  value,
+  suffix,
+  description
+}: {
+  tone: 'blue' | 'green' | 'amber' | 'red';
+  icon: ReactNode;
+  label: string;
+  value: number;
+  suffix?: string;
+  description: string;
+}) {
+  return (
+    <Card className={`metric-card metric-card-${tone}`}>
+      <div className="metric-card-head">
+        <span className="metric-icon">{icon}</span>
+        <Text type="secondary" className="metric-label">{label}</Text>
+      </div>
+      <div className="metric-value-row">
+        <span className="metric-value">{value}</span>
+        {suffix ? <Text type="secondary">{suffix}</Text> : null}
+      </div>
+      <Text type="secondary" className="metric-desc">{description}</Text>
+    </Card>
+  );
+}
+
+function RelayDetailItem({ label, value, strong = false }: { label: string; value: ReactNode; strong?: boolean }) {
+  return (
+    <div className="overview-relay-item">
+      <Text type="secondary">{label}</Text>
+      {strong ? <Text strong>{value}</Text> : <Text>{value}</Text>}
+    </div>
+  );
+}
+
 function OverviewView({
   selectedRelay,
   relayCount,
@@ -3133,64 +3149,45 @@ function OverviewView({
     <Flex vertical gap={16} className="full-width">
       <Row gutter={[16, 16]}>
         <Col xs={24} sm={12} xl={6}>
-          <Card className="metric-card metric-card-blue">
-            <Statistic title="主站" value={relayCount} prefix={<ApiOutlined />} suffix={<Text type="secondary">个</Text>} />
-            <Text type="secondary">当前只管理一个 NewAPI 主站</Text>
-          </Card>
+          <MetricCard tone="blue" icon={<ApiOutlined />} label="主站" value={relayCount} suffix="个" description="当前只管理一个主站" />
         </Col>
         <Col xs={24} sm={12} xl={6}>
-          <Card className="metric-card metric-card-green">
-            <Statistic title="渠道" value={channelCount} prefix={<CloudOutlined />} suffix={<Text type="secondary">个</Text>} />
-            <Text type="secondary">{readableCount} 个已获取倍率和余额</Text>
-          </Card>
+          <MetricCard tone="green" icon={<CloudOutlined />} label="渠道" value={channelCount} suffix="个" description={`${readableCount} 个已获取倍率和余额`} />
         </Col>
         <Col xs={24} sm={12} xl={6}>
-          <Card className="metric-card metric-card-amber">
-            <Statistic title="待同步渠道" value={pendingSyncCount} prefix={<FieldTimeOutlined />} />
-            <Text type="secondary">新增或认证信息变更后需要同步</Text>
-          </Card>
+          <MetricCard tone="amber" icon={<FieldTimeOutlined />} label="待同步渠道" value={pendingSyncCount} description="新增或认证信息变更后需要同步" />
         </Col>
         <Col xs={24} sm={12} xl={6}>
-          <Card className="metric-card metric-card-red">
-            <Statistic title="受限渠道" value={limitedCount} prefix={<AlertOutlined />} />
-            <Text type="secondary">API Key、CF Challenge；{cliProxyCount} 个仅转发</Text>
-          </Card>
+          <MetricCard tone="red" icon={<AlertOutlined />} label="受限渠道" value={limitedCount} description={`受限认证、CF Challenge；${cliProxyCount} 个仅转发`} />
         </Col>
       </Row>
 
       <Row gutter={[16, 16]} className="overview-detail-row">
         <Col xs={24} xl={10}>
           <Card title="当前主站" className="overview-relay-card" extra={<Button size="small" icon={<SettingOutlined />} onClick={onConfigureRelay}>配置</Button>}>
-            <Descriptions
-              column={1}
-              size="small"
-              items={[
-                { key: 'name', label: '名称', children: selectedRelay?.name ?? '-' },
-                { key: 'type', label: '类型', children: <RelayTypeTag /> },
-                { key: 'baseUrl', label: '地址', children: selectedRelay?.baseUrl ?? '-' },
-                { key: 'adminUserId', label: '管理员用户', children: selectedRelay?.adminUserId || '-' },
-                {
-                  key: 'auth',
-                  label: '管理 Token',
-                  children: selectedRelay ? (
-                    <Space size={6}>
-                      <Text>{selectedRelay.auth}</Text>
-                      <Tag color={selectedRelay.tokenConfigured ? 'green' : 'default'}>
-                        {selectedRelay.tokenConfigured ? '已配置' : '未配置'}
-                      </Tag>
-                    </Space>
-                  ) : (
-                    '-'
-                  )
-                },
-                { key: 'sync', label: '同步', children: selectedRelay?.sync ?? '-' },
-                {
-                  key: 'status',
-                  label: '状态',
-                  children: selectedRelay ? <StatusTag tone={selectedRelay.statusTone}>{selectedRelay.status}</StatusTag> : '-'
-                }
-              ]}
-            />
+            <div className="overview-relay-detail">
+              <RelayDetailItem label="名称" value={selectedRelay?.name ?? '-'} strong />
+              <RelayDetailItem label="地址" value={selectedRelay?.baseUrl ?? '-'} />
+              <RelayDetailItem label="管理员用户" value={selectedRelay?.adminUserId || '-'} />
+              <div className="overview-relay-item">
+                <Text type="secondary">管理 Token</Text>
+                {selectedRelay ? (
+                  <Space size={6}>
+                    <Text>{selectedRelay.auth}</Text>
+                    <Tag color={selectedRelay.tokenConfigured ? 'green' : 'default'}>
+                      {selectedRelay.tokenConfigured ? '已配置' : '未配置'}
+                    </Tag>
+                  </Space>
+                ) : (
+                  <Text>-</Text>
+                )}
+              </div>
+              <RelayDetailItem label="同步" value={selectedRelay?.sync ?? '-'} />
+              <div className="overview-relay-item">
+                <Text type="secondary">状态</Text>
+                {selectedRelay ? <StatusTag tone={selectedRelay.statusTone}>{selectedRelay.status}</StatusTag> : <Text>-</Text>}
+              </div>
+            </div>
           </Card>
         </Col>
         <Col xs={24} xl={14}>
@@ -4002,12 +3999,103 @@ function RatesCard({
   );
 }
 
+function PasswordVaultLoginFields({
+  entries,
+  provider,
+  baseUrl,
+  extra,
+  required = false,
+  saving,
+  onSelect,
+  onSave
+}: {
+  entries: PasswordVaultEntryView[];
+  provider: 'newapi' | 'sub2api';
+  baseUrl?: string | null;
+  extra: string;
+  required?: boolean;
+  saving: boolean;
+  onSelect: (entryId?: string) => void;
+  onSave: () => void;
+}) {
+  const normalizedBaseUrl = normalizeVaultBaseUrl(baseUrl);
+  const options = entries
+    .filter((entry) => entry.provider === provider)
+    .slice()
+    .sort((left, right) => {
+      const leftMatch = normalizeVaultBaseUrl(left.baseUrl) === normalizedBaseUrl ? 0 : 1;
+      const rightMatch = normalizeVaultBaseUrl(right.baseUrl) === normalizedBaseUrl ? 0 : 1;
+      return leftMatch - rightMatch || left.name.localeCompare(right.name, 'zh-CN');
+    })
+    .map((entry) => ({
+      value: entry.id,
+      label: `${entry.name} · ${entry.account}${entry.baseUrl ? ` · ${entry.baseUrl}` : ''}`
+    }));
+
+  return (
+    <Flex vertical gap={10} className="password-vault-login">
+      <Form.Item
+        name="passwordVaultId"
+        label="密码箱账号"
+        extra="选择后会自动填入账号和密码，密码不会在页面直接展示。"
+      >
+        <Select
+          allowClear
+          showSearch
+          placeholder={options.length > 0 ? '选择已保存账号' : '密码箱里还没有账号'}
+          options={options}
+          optionFilterProp="label"
+          onChange={(value) => onSelect(typeof value === 'string' ? value : undefined)}
+          notFoundContent="没有匹配的账号"
+        />
+      </Form.Item>
+      <Row gutter={12}>
+        <Col xs={24} md={12}>
+          <Form.Item
+            name="credentialAccount"
+            label="账号 / 邮箱"
+            extra={extra}
+            rules={required ? [{ required: true, message: '请输入账号或邮箱' }] : undefined}
+          >
+            <Input placeholder="例如 user@example.com" autoComplete="username" />
+          </Form.Item>
+        </Col>
+        <Col xs={24} md={12}>
+          <Form.Item
+            name="credentialPassword"
+            label="密码"
+            extra={extra}
+            rules={required ? [{ required: true, message: '请输入密码' }] : undefined}
+          >
+            <Input.Password placeholder="请输入密码" autoComplete="current-password" />
+          </Form.Item>
+        </Col>
+      </Row>
+      <Space size={8} wrap>
+        <Button htmlType="button" icon={<KeyOutlined />} loading={saving} onClick={onSave}>
+          保存到密码箱
+        </Button>
+      </Space>
+    </Flex>
+  );
+}
+
 function CredentialsView({
   groups,
-  onEditGroup
+  passwordVaultEntries,
+  passwordVaultLoading,
+  deletingPasswordVaultId,
+  onEditGroup,
+  onReloadPasswordVault,
+  onDeletePasswordVault
 }: {
   groups: CredentialGroup[];
+  passwordVaultEntries: PasswordVaultEntryView[];
+  passwordVaultLoading: boolean;
+  deletingPasswordVaultId: string | null;
   onEditGroup: (group: CredentialGroup) => void;
+  onReloadPasswordVault: () => void;
+  onDeletePasswordVault: (id: string) => void;
 }) {
   const configuredCount = groups.reduce((total, group) => total + group.configuredCount, 0);
   const channelCount = groups.reduce((total, group) => total + group.channels.length, 0);
@@ -4079,27 +4167,121 @@ function CredentialsView({
   ];
 
   return (
+    <Flex vertical gap={14}>
+      <PasswordVaultCard
+        entries={passwordVaultEntries}
+        loading={passwordVaultLoading}
+        deletingId={deletingPasswordVaultId}
+        onReload={onReloadPasswordVault}
+        onDelete={onDeletePasswordVault}
+      />
+      <Card
+        title="平台分组凭证管理"
+        extra={
+          <Space size={8} wrap>
+            <Tag color="green">同平台分组共用</Tag>
+            <Text type="secondary">
+              服务端 {configuredCount}/{channelCount} 个渠道
+            </Text>
+          </Space>
+        }
+      >
+        <Table
+          rowKey="key"
+          columns={columns}
+          dataSource={groups}
+          pagination={{ pageSize: 8, showSizeChanger: false, hideOnSinglePage: true }}
+          size="middle"
+          scroll={{ x: 1050 }}
+          locale={{
+            emptyText: <Empty description="还没有可管理的平台分组凭证" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+          }}
+        />
+      </Card>
+    </Flex>
+  );
+}
+
+function PasswordVaultCard({
+  entries,
+  loading,
+  deletingId,
+  onReload,
+  onDelete
+}: {
+  entries: PasswordVaultEntryView[];
+  loading: boolean;
+  deletingId: string | null;
+  onReload: () => void;
+  onDelete: (id: string) => void;
+}) {
+  const columns: ColumnsType<PasswordVaultEntryView> = [
+    {
+      title: '账号',
+      key: 'account',
+      width: 260,
+      render: (_, record) => (
+        <Flex vertical gap={4} className="cell-main">
+          <Space size={8} wrap>
+            <Text strong>{record.name}</Text>
+            <ProviderTag type={record.provider} />
+          </Space>
+          <Text type="secondary" className="truncate-text">{record.account}</Text>
+        </Flex>
+      )
+    },
+    {
+      title: '站点',
+      dataIndex: 'baseUrl',
+      width: 260,
+      render: (value) => <Text type="secondary" className="truncate-text">{value || '未绑定站点'}</Text>
+    },
+    {
+      title: '最近使用',
+      dataIndex: 'lastUsedAt',
+      width: 150,
+      render: (value) => <Text type="secondary">{formatOptionalTime(value)}</Text>
+    },
+    {
+      title: '操作',
+      key: 'action',
+      width: 110,
+      fixed: 'right',
+      render: (_, record) => (
+        <Popconfirm
+          title="删除密码箱账号"
+          description="只删除密码箱记录，不影响已保存的平台凭证。"
+          okText="删除"
+          cancelText="取消"
+          okButtonProps={{ danger: true }}
+          onConfirm={() => onDelete(record.id)}
+        >
+          <Button danger type="link" size="small" icon={<DeleteOutlined />} loading={deletingId === record.id}>
+            删除
+          </Button>
+        </Popconfirm>
+      )
+    }
+  ];
+
+  return (
     <Card
-      title="平台分组凭证管理"
-      extra={
-        <Space size={8} wrap>
-          <Tag color="green">同平台分组共用</Tag>
-          <Text type="secondary">
-            服务端 {configuredCount}/{channelCount} 个渠道
-          </Text>
-        </Space>
+      title={
+        <div className="table-card-title">
+          <Text strong>密码箱</Text>
+          <Text type="secondary">账号密码登录时可选择这里的账号；密码只在选择时解密填入。</Text>
+        </div>
       }
+      extra={<Button icon={<ReloadOutlined />} loading={loading} onClick={onReload}>刷新</Button>}
     >
       <Table
-        rowKey="key"
+        rowKey="id"
         columns={columns}
-        dataSource={groups}
-        pagination={{ pageSize: 8, showSizeChanger: false, hideOnSinglePage: true }}
+        dataSource={entries}
+        pagination={{ pageSize: 5, showSizeChanger: false, hideOnSinglePage: true }}
         size="middle"
-        scroll={{ x: 1050 }}
-        locale={{
-          emptyText: <Empty description="还没有可管理的平台分组凭证" image={Empty.PRESENTED_IMAGE_SIMPLE} />
-        }}
+        scroll={{ x: 780 }}
+        locale={{ emptyText: <Empty description="还没有保存账号，在账号密码模式里点击“保存到密码箱”" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
       />
     </Card>
   );
@@ -4233,7 +4415,13 @@ function CpaPoolPanel({
           loading={loading}
           columns={columns}
           dataSource={data.accounts}
-          pagination={{ pageSize: 10, showSizeChanger: false, hideOnSinglePage: true }}
+          pagination={{
+            pageSize: 10,
+            showSizeChanger: false,
+            hideOnSinglePage: false,
+            showLessItems: true,
+            showTotal: (total, range) => `${range[0]}-${range[1]} / ${total}`
+          }}
           size="middle"
           scroll={{ x: 1060 }}
           locale={{ emptyText: <Empty description="没有读取到号池账号，先给 CPA 渠道配置管理密钥" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
@@ -4248,22 +4436,6 @@ function CpaMetric({ label, value, tone = 'default' }: { label: string; value: s
     <div className={`cpa-metric cpa-metric-${tone}`}>
       <Text type="secondary" className="cpa-metric-label">{label}</Text>
       <Text strong className="cpa-metric-value">{value}</Text>
-    </div>
-  );
-}
-
-function SearchOption({ title, description, tag }: { title: string; description: string; tag: string }) {
-  return (
-    <div className="search-option">
-      <span className="search-option-copy">
-        <Text strong className="search-option-title">
-          {title}
-        </Text>
-        <Text type="secondary" className="search-option-desc">
-          {description}
-        </Text>
-      </span>
-      <Tag className="search-option-tag">{tag}</Tag>
     </div>
   );
 }
@@ -4838,10 +5010,6 @@ function ProviderTag({ type }: { type: UpstreamProvider }) {
   return <Tag color={config.color}>{config.label}</Tag>;
 }
 
-function RelayTypeTag() {
-  return <Tag color="green">NewAPI 主站</Tag>;
-}
-
 function StatusTag({ tone, children }: { tone: StatusTone; children: ReactNode }) {
   const color = tone === 'ok' ? 'green' : tone === 'warn' ? 'gold' : tone === 'error' ? 'red' : 'blue';
   return <Tag color={color}>{children}</Tag>;
@@ -4850,12 +5018,26 @@ function StatusTag({ tone, children }: { tone: StatusTone; children: ReactNode }
 function UsagePercent({ value }: { value: CpaUsageMetric | number | null | undefined }) {
   const metric = normalizeUsageMetric(value);
 
-  if (!metric || metric.percent === null || !Number.isFinite(Number(metric.percent))) {
-    return <Text type="secondary" className="usage-empty">未上报</Text>;
+  if (!metric) {
+    return <Text type="secondary" className="usage-empty">未采集</Text>;
+  }
+
+  const detail = metric.label ?? usageMetricLabel(metric);
+
+  if (metric.percent === null || !Number.isFinite(Number(metric.percent))) {
+    if (!detail) {
+      return <Text type="secondary" className="usage-empty">未采集</Text>;
+    }
+
+    return (
+      <Flex vertical gap={2} className="usage-percent usage-percent-plain">
+        <Text strong>{detail}</Text>
+        <Text type="secondary" className="usage-empty">未返回限额</Text>
+      </Flex>
+    );
   }
 
   const percent = Math.max(0, Math.min(100, Number(metric.percent)));
-  const detail = metric.label ?? usageMetricLabel(metric);
 
   return (
     <Flex vertical gap={4} className="usage-percent">
@@ -4885,8 +5067,11 @@ function normalizeUsageMetric(value: CpaUsageMetric | number | null | undefined)
 }
 
 function usageMetricLabel(metric: CpaUsageMetric) {
-  if (metric.used === null || metric.used === undefined || metric.limit === null || metric.limit === undefined) {
+  if (metric.used === null || metric.used === undefined) {
     return null;
+  }
+  if (metric.limit === null || metric.limit === undefined) {
+    return `${formatUsageNumber(metric.used)} tokens`;
   }
 
   return `${formatUsageNumber(metric.used)} / ${formatUsageNumber(metric.limit)}`;
@@ -5863,6 +6048,11 @@ function normalizedExternalUrl(value: string) {
   } catch {
     return null;
   }
+}
+
+function normalizeVaultBaseUrl(value: unknown) {
+  const text = String(value ?? '').trim();
+  return text ? text.replace(/\/+$/, '').toLowerCase() : null;
 }
 
 function credentialMode(channel: ChannelView): CredentialMode {

@@ -1,4 +1,5 @@
-import { BadRequestException, Inject, Injectable } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
+import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { AuthMode, Prisma, UpstreamStatus, UpstreamType } from '@prisma/client';
 import { decryptCredentialPayload, encryptCredentialPayload } from '../vault/credential-vault';
 import { PrismaService } from '../prisma.service';
@@ -9,6 +10,7 @@ const upstreamTypes = new Set(Object.values(UpstreamType));
 const authModes = new Set(Object.values(AuthMode));
 const upstreamStatuses = new Set(Object.values(UpstreamStatus));
 const cpaUsageRetentionMs = 7 * 24 * 60 * 60_000;
+const cpaUsageFiveHourMs = 5 * 60 * 60_000;
 const upstreamInclude = {
   credential: {
     select: {
@@ -71,6 +73,37 @@ type CredentialTestResult = {
   balanceCurrency?: string;
   groupRatio?: number | null;
   rateSource?: string;
+};
+
+type PasswordVaultInput = {
+  name?: string;
+  provider?: string;
+  baseUrl?: string;
+  account?: string;
+  password?: string;
+};
+
+type PasswordVaultRow = {
+  id: string;
+  name: string;
+  provider: string;
+  baseUrl: string | null;
+  account: string;
+  encryptedPayload: string;
+  lastUsedAt: Date | string | null;
+  createdAt: Date | string;
+  updatedAt: Date | string;
+};
+
+type PasswordVaultView = {
+  id: string;
+  name: string;
+  provider: 'newapi' | 'sub2api';
+  baseUrl: string | null;
+  account: string;
+  lastUsedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
 };
 
 type UpstreamGroupInfo = {
@@ -515,6 +548,108 @@ export class UpstreamsService {
     });
   }
 
+  async passwordVault(provider?: string, baseUrl?: string) {
+    await this.ensureSchema();
+
+    const providerFilter = normalizeVaultProvider(provider);
+    const baseUrlFilter = normalizeVaultBaseUrl(baseUrl);
+    const rows = await this.prisma.$queryRaw<PasswordVaultRow[]>`
+      SELECT id, name, provider, baseUrl, account, encryptedPayload, lastUsedAt, createdAt, updatedAt
+      FROM PasswordVaultEntry
+      ORDER BY updatedAt DESC
+    `;
+
+    return rows
+      .map(passwordVaultView)
+      .filter((entry) => !providerFilter || entry.provider === providerFilter)
+      .filter((entry) => !baseUrlFilter || normalizeVaultBaseUrl(entry.baseUrl) === baseUrlFilter);
+  }
+
+  async passwordVaultEntry(id: string) {
+    await this.ensureSchema();
+
+    const row = await this.passwordVaultRow(id);
+    const payload = decryptCredentialPayload(row.encryptedPayload);
+    const password = payload.password;
+
+    if (!password) {
+      throw new BadRequestException('密码箱条目缺少密码，请重新保存');
+    }
+
+    await this.prisma.$executeRaw`
+      UPDATE PasswordVaultEntry
+      SET lastUsedAt = CURRENT_TIMESTAMP(3), updatedAt = CURRENT_TIMESTAMP(3)
+      WHERE id = ${id}
+    `;
+
+    return {
+      ...passwordVaultView(row),
+      password,
+      account: payload.email || payload.username || row.account
+    };
+  }
+
+  async savePasswordVaultEntry(input: PasswordVaultInput, id?: string) {
+    await this.ensureSchema();
+
+    const provider = normalizeVaultProvider(input.provider);
+    if (!provider) {
+      throw new BadRequestException('密码箱只支持 NewAPI 或 Sub2API 账号');
+    }
+
+    const account = input.account?.trim();
+    if (!account) {
+      throw new BadRequestException('请输入账号或邮箱');
+    }
+
+    const baseUrl = normalizeVaultBaseUrl(input.baseUrl);
+    const existing = id
+      ? await this.passwordVaultRow(id)
+      : await this.passwordVaultRowByIdentity(provider, baseUrl, account).catch(() => null);
+    const password = input.password?.trim();
+    if (!password && !existing) {
+      throw new BadRequestException('请输入密码');
+    }
+
+    const entryId = id ?? existing?.id ?? `vault-${randomUUID()}`;
+    const name = input.name?.trim() || existing?.name || account;
+    const encryptedPayload = password
+      ? encryptCredentialPayload({ email: account, username: account, password })
+      : existing?.encryptedPayload;
+
+    if (!encryptedPayload) {
+      throw new BadRequestException('请输入密码');
+    }
+
+    if (existing) {
+      await this.prisma.$executeRaw`
+        UPDATE PasswordVaultEntry
+        SET name = ${name},
+            provider = ${provider.toUpperCase()},
+            baseUrl = ${baseUrl},
+            account = ${account},
+            encryptedPayload = ${encryptedPayload},
+            updatedAt = CURRENT_TIMESTAMP(3)
+        WHERE id = ${entryId}
+      `;
+    } else {
+      await this.prisma.$executeRaw`
+        INSERT INTO PasswordVaultEntry (id, name, provider, baseUrl, account, encryptedPayload, createdAt, updatedAt)
+        VALUES (${entryId}, ${name}, ${provider.toUpperCase()}, ${baseUrl}, ${account}, ${encryptedPayload}, CURRENT_TIMESTAMP(3), CURRENT_TIMESTAMP(3))
+      `;
+    }
+
+    return passwordVaultView(await this.passwordVaultRow(entryId));
+  }
+
+  async deletePasswordVaultEntry(id: string) {
+    await this.ensureSchema();
+
+    await this.prisma.$executeRaw`DELETE FROM PasswordVaultEntry WHERE id = ${id}`;
+
+    return { deleted: true, id };
+  }
+
   async cpaPool(id: string) {
     await this.ensureSchema();
 
@@ -561,7 +696,9 @@ export class UpstreamsService {
       return {
         ...account,
         successCount: account.successCount || usage.successCount,
-        failureCount: account.failureCount || usage.failureCount
+        failureCount: account.failureCount || usage.failureCount,
+        usage5h: mergeCpaUsageMetric(account.usage5h, usage.usage5h),
+        usage7d: mergeCpaUsageMetric(account.usage7d, usage.usage7d)
       };
     });
 
@@ -772,12 +909,28 @@ export class UpstreamsService {
     }
 
     for (const statement of [
+      `CREATE TABLE IF NOT EXISTS PasswordVaultEntry (
+        id VARCHAR(191) NOT NULL,
+        name VARCHAR(191) NOT NULL,
+        provider VARCHAR(32) NOT NULL,
+        baseUrl VARCHAR(512) NULL,
+        account VARCHAR(255) NOT NULL,
+        encryptedPayload LONGTEXT NOT NULL,
+        lastUsedAt DATETIME(3) NULL,
+        createdAt DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+        updatedAt DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+        PRIMARY KEY (id),
+        INDEX PasswordVaultEntry_provider_idx (provider),
+        INDEX PasswordVaultEntry_account_idx (account)
+      )`,
       "ALTER TABLE Upstream MODIFY COLUMN type ENUM('NEWAPI','SUB2API','CLI_PROXY') NOT NULL",
       'ALTER TABLE Upstream MODIFY COLUMN rechargeRatio DECIMAL(10,2) NOT NULL DEFAULT 1',
       'ALTER TABLE Upstream MODIFY COLUMN lastError TEXT NULL',
       'ALTER TABLE Upstream MODIFY COLUMN latencyLastError TEXT NULL',
       'ALTER TABLE Upstream ADD COLUMN skipLatencyDisable BOOLEAN NOT NULL DEFAULT false',
-      'ALTER TABLE Credential MODIFY COLUMN encryptedPayload TEXT NOT NULL'
+      'ALTER TABLE Credential MODIFY COLUMN encryptedPayload TEXT NOT NULL',
+      'ALTER TABLE PasswordVaultEntry MODIFY COLUMN encryptedPayload LONGTEXT NOT NULL',
+      'ALTER TABLE PasswordVaultEntry ADD COLUMN lastUsedAt DATETIME(3) NULL'
     ]) {
       try {
         await retrySchemaStatement(() => this.prisma.$executeRawUnsafe(statement));
@@ -789,6 +942,35 @@ export class UpstreamsService {
     }
 
     this.schemaChecked = true;
+  }
+
+  private async passwordVaultRow(id: string) {
+    const rows = await this.prisma.$queryRaw<PasswordVaultRow[]>`
+      SELECT id, name, provider, baseUrl, account, encryptedPayload, lastUsedAt, createdAt, updatedAt
+      FROM PasswordVaultEntry
+      WHERE id = ${id}
+      LIMIT 1
+    `;
+    const row = rows[0];
+
+    if (!row) {
+      throw new NotFoundException('password vault entry not found');
+    }
+
+    return row;
+  }
+
+  private async passwordVaultRowByIdentity(provider: string, baseUrl: string | null, account: string) {
+    const rows = await this.prisma.$queryRaw<PasswordVaultRow[]>`
+      SELECT id, name, provider, baseUrl, account, encryptedPayload, lastUsedAt, createdAt, updatedAt
+      FROM PasswordVaultEntry
+      WHERE provider = ${provider.toUpperCase()}
+        AND account = ${account}
+        AND ((baseUrl IS NULL AND ${baseUrl} IS NULL) OR baseUrl = ${baseUrl})
+      LIMIT 1
+    `;
+
+    return rows[0] ?? null;
   }
 
   private async updateMainStationChannelIfNeeded(
@@ -1788,6 +1970,53 @@ function cpaManagementKey(payload: Record<string, string>) {
     || null;
 }
 
+function passwordVaultView(row: PasswordVaultRow): PasswordVaultView {
+  return {
+    id: row.id,
+    name: row.name,
+    provider: normalizeVaultProvider(row.provider) ?? 'newapi',
+    baseUrl: row.baseUrl?.trim() || null,
+    account: row.account,
+    lastUsedAt: toIsoTime(row.lastUsedAt),
+    createdAt: toIsoTime(row.createdAt) ?? new Date().toISOString(),
+    updatedAt: toIsoTime(row.updatedAt) ?? new Date().toISOString()
+  };
+}
+
+function normalizeVaultProvider(value: unknown) {
+  const normalized = String(value ?? '').trim().toLowerCase();
+
+  if (normalized === 'newapi' || normalized === 'new_api' || normalized === 'new') {
+    return 'newapi' as const;
+  }
+  if (normalized === 'sub2api' || normalized === 'sub2_api' || normalized === 'sub2') {
+    return 'sub2api' as const;
+  }
+  if (normalized === 'NEWAPI' || normalized === 'SUB2API') {
+    return normalized.toLowerCase() as 'newapi' | 'sub2api';
+  }
+
+  return null;
+}
+
+function normalizeVaultBaseUrl(value: unknown) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  const text = String(value).trim();
+  return text ? text.replace(/\/+$/, '') : null;
+}
+
+function toIsoTime(value: Date | string | null | undefined) {
+  if (!value) {
+    return null;
+  }
+
+  const timestamp = value instanceof Date ? value.getTime() : Date.parse(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
+}
+
 function parseCpaAuthFiles(value: unknown) {
   const records = arrayOfRecords(value);
 
@@ -1846,6 +2075,38 @@ function parseCpaAuthFiles(value: unknown) {
       usageMetricFromPair(firstDefined(record.week_used, record.weekUsed, record.weekly_used, record.weeklyUsed, record.usage_7d_used, record.usage7dUsed, record.used_7d, record.used7d), firstDefined(record.week_limit, record.weekLimit, record.weekly_limit, record.weeklyLimit, record.usage_7d_limit, record.usage7dLimit, record.limit_7d, record.limit7d)),
       usageMetricFromPair(firstDefined(record.week_usage, record.weekUsage, record.weekly_usage, record.weeklyUsage), firstDefined(record.week_limit, record.weekLimit, record.weekly_limit, record.weeklyLimit))
     ),
+    usageLimit5h: cpaUsageLimit(
+      record.usage_5h,
+      record.usage5h,
+      record.usage_5_hours,
+      record.usage5Hours,
+      record.five_hour,
+      record.fiveHour,
+      record.five_hours,
+      record.fiveHours,
+      record.five_hour_limit,
+      record.fiveHourLimit,
+      record.five_hours_limit,
+      record.fiveHoursLimit,
+      record.usage_5h_limit,
+      record.usage5hLimit,
+      record.limit_5h,
+      record.limit5h
+    ),
+    usageLimit7d: cpaUsageLimit(
+      record.usage_7d,
+      record.usage7d,
+      record.week,
+      record.weekly,
+      record.week_limit,
+      record.weekLimit,
+      record.weekly_limit,
+      record.weeklyLimit,
+      record.usage_7d_limit,
+      record.usage7dLimit,
+      record.limit_7d,
+      record.limit7d
+    ),
     lastRefresh:
       stringValue(record.last_refresh) ??
       stringValue(record.lastRefresh) ??
@@ -1861,30 +2122,80 @@ function parseCpaAuthFiles(value: unknown) {
 }
 
 function parseCpaUsageRecords(value: unknown): CpaUsageRecord[] {
-  return arrayOfRecords(value).map((record) => ({
-    timestamp: stringValue(record.timestamp) ?? stringValue(record.time) ?? stringValue(record.created_at) ?? new Date().toISOString(),
-    authIndex: stringValue(record.auth_index) ?? stringValue(record.authIndex) ?? stringValue(record.index) ?? stringValue(record.file) ?? stringValue(record.name),
-    source: stringValue(record.source) ?? stringValue(record.model),
-    totalTokens:
-      numeric(record.total_tokens) ??
-      numeric(record.totalTokens) ??
-      numeric(record.tokens) ??
-      numeric(recordValue(record.tokens)?.total_tokens) ??
-      numeric(recordValue(record.tokens)?.totalTokens) ??
-      numeric(recordValue(record.usage)?.total_tokens) ??
-      numeric(recordValue(record.usage)?.totalTokens) ??
-      (numeric(record.prompt_tokens) ?? 0) + (numeric(record.completion_tokens) ?? 0),
-    failed: booleanValue(record.failed) === true || ['failed', 'error'].includes(stringValue(record.status)?.toLowerCase() ?? '')
-  })).filter((record) => Number.isFinite(Date.parse(record.timestamp)));
+  return arrayOfRecords(value).map((record) => {
+    const authRecord = recordValue(record.auth) ?? recordValue(record.account);
+    const tokenRecord = recordValue(record.tokens);
+    const usageRecord = recordValue(record.usage);
+    const promptTokens = firstNumeric(
+      record.prompt_tokens,
+      record.promptTokens,
+      record.input_tokens,
+      record.inputTokens,
+      tokenRecord?.prompt_tokens,
+      tokenRecord?.promptTokens,
+      tokenRecord?.input_tokens,
+      tokenRecord?.inputTokens,
+      usageRecord?.prompt_tokens,
+      usageRecord?.promptTokens,
+      usageRecord?.input_tokens,
+      usageRecord?.inputTokens
+    );
+    const completionTokens = firstNumeric(
+      record.completion_tokens,
+      record.completionTokens,
+      record.output_tokens,
+      record.outputTokens,
+      tokenRecord?.completion_tokens,
+      tokenRecord?.completionTokens,
+      tokenRecord?.output_tokens,
+      tokenRecord?.outputTokens,
+      usageRecord?.completion_tokens,
+      usageRecord?.completionTokens,
+      usageRecord?.output_tokens,
+      usageRecord?.outputTokens
+    );
+    const totalTokens = firstNumeric(
+      record.total_tokens,
+      record.totalTokens,
+      record.tokens,
+      record.token_count,
+      record.tokenCount,
+      tokenRecord?.total_tokens,
+      tokenRecord?.totalTokens,
+      tokenRecord?.total,
+      usageRecord?.total_tokens,
+      usageRecord?.totalTokens,
+      usageRecord?.total
+    ) ?? (promptTokens ?? 0) + (completionTokens ?? 0);
+
+    return {
+      timestamp: stringValue(record.timestamp) ?? stringValue(record.time) ?? stringValue(record.created_at) ?? new Date().toISOString(),
+      authIndex: stringValue(firstDefined(record.auth_index, record.authIndex, record.index, record.auth_file, record.authFile, record.file, record.name, authRecord?.index, authRecord?.id, authRecord?.name)),
+      source: stringValue(firstDefined(record.source, record.email, record.account, record.username, authRecord?.email, authRecord?.account, authRecord?.username)),
+      totalTokens,
+      failed: booleanValue(record.failed) === true || ['failed', 'error'].includes(stringValue(record.status)?.toLowerCase() ?? '')
+    };
+  }).filter((record) => Number.isFinite(Date.parse(record.timestamp)));
 }
 
-function aggregateCpaUsage(records: CpaUsageRecord[], account: { index: string; key: string; name: string }, index: number) {
-  const keys = new Set([account.index, account.key, account.name, String(index)]);
+function aggregateCpaUsage(
+  records: CpaUsageRecord[],
+  account: { index: string; key: string; name: string; account?: string; usageLimit5h?: number | null; usageLimit7d?: number | null },
+  index: number
+) {
+  const keys = cpaAccountUsageKeys(account, index);
+  const nowMs = Date.now();
+  const fiveHourCutoff = nowMs - cpaUsageFiveHourMs;
+  const weekCutoff = nowMs - cpaUsageRetentionMs;
   let successCount = 0;
   let failureCount = 0;
+  let used5h = 0;
+  let used7d = 0;
+  let observed5h = false;
+  let observed7d = false;
 
   for (const record of records) {
-    if (record.authIndex && !keys.has(record.authIndex)) {
+    if (!cpaUsageRecordMatchesAccount(record, keys)) {
       continue;
     }
 
@@ -1894,9 +2205,76 @@ function aggregateCpaUsage(records: CpaUsageRecord[], account: { index: string; 
     }
 
     successCount += 1;
+    const timestamp = Date.parse(record.timestamp);
+    const amount = Number.isFinite(record.totalTokens) ? Math.max(0, record.totalTokens) : 0;
+
+    if (timestamp >= weekCutoff) {
+      observed7d = true;
+      used7d += amount;
+    }
+    if (timestamp >= fiveHourCutoff) {
+      observed5h = true;
+      used5h += amount;
+    }
   }
 
-  return { successCount, failureCount };
+  return {
+    successCount,
+    failureCount,
+    usage5h: usageMetricFromCollected(used5h, account.usageLimit5h, observed5h),
+    usage7d: usageMetricFromCollected(used7d, account.usageLimit7d, observed7d)
+  };
+}
+
+function cpaAccountUsageKeys(account: { index: string; key: string; name: string; account?: string }, index: number) {
+  return new Set([account.index, account.key, account.name, account.account, String(index)]
+    .map(normalizeUsageKey)
+    .filter((value): value is string => Boolean(value)));
+}
+
+function cpaUsageRecordMatchesAccount(record: CpaUsageRecord, keys: Set<string>) {
+  const candidates = [record.authIndex, record.source].map(normalizeUsageKey).filter((value): value is string => Boolean(value));
+  if (candidates.length === 0) {
+    return true;
+  }
+
+  return candidates.some((candidate) => keys.has(candidate));
+}
+
+function normalizeUsageKey(value: unknown) {
+  return String(value ?? '').trim().toLowerCase() || null;
+}
+
+function usageMetricFromCollected(used: number, limit: number | null | undefined, observed: boolean): CpaUsageMetric | null {
+  if (!observed) {
+    return null;
+  }
+  if (limit !== null && limit !== undefined && limit > 0) {
+    return usageMetricFromPair(used, limit);
+  }
+
+  return {
+    percent: null,
+    used,
+    limit: null,
+    label: `${formatUsageNumber(used)} tokens`
+  };
+}
+
+function mergeCpaUsageMetric(existing: CpaUsageMetric | null, collected: CpaUsageMetric | null) {
+  if (!existing) {
+    return collected;
+  }
+  if (!collected) {
+    return existing;
+  }
+
+  return {
+    percent: collected.percent ?? existing.percent,
+    used: collected.used ?? existing.used,
+    limit: collected.limit ?? existing.limit,
+    label: collected.label ?? existing.label
+  };
 }
 
 function cpaAccountStatus(record: Record<string, unknown>) {
@@ -1964,6 +2342,22 @@ function cpaUsageMetric(...values: unknown[]): CpaUsageMetric | null {
     const metric = usageMetricFromValue(value);
     if (metric) {
       return metric;
+    }
+  }
+
+  return null;
+}
+
+function cpaUsageLimit(...values: unknown[]) {
+  for (const value of values) {
+    const parsed = numeric(value);
+    if (parsed !== undefined && parsed > 0) {
+      return parsed;
+    }
+
+    const metric = usageMetricFromValue(value);
+    if (metric?.limit !== null && metric?.limit !== undefined && metric.limit > 0) {
+      return metric.limit;
     }
   }
 

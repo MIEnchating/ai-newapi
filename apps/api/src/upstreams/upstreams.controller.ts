@@ -139,6 +139,50 @@ export class UpstreamsController {
     return this.upstreams.rates(id);
   }
 
+  @Get('password-vault')
+  passwordVault() {
+    return this.upstreams.passwordVault();
+  }
+
+  @Get('password-vault/:id')
+  passwordVaultEntry(@Param('id') id: string) {
+    return this.upstreams.passwordVaultEntry(id);
+  }
+
+  @Post('password-vault')
+  createPasswordVaultEntry(
+    @Body()
+    body: {
+      name?: string;
+      provider?: string;
+      baseUrl?: string;
+      account?: string;
+      password?: string;
+    }
+  ) {
+    return this.upstreams.savePasswordVaultEntry(body);
+  }
+
+  @Patch('password-vault/:id')
+  updatePasswordVaultEntry(
+    @Param('id') id: string,
+    @Body()
+    body: {
+      name?: string;
+      provider?: string;
+      baseUrl?: string;
+      account?: string;
+      password?: string;
+    }
+  ) {
+    return this.upstreams.savePasswordVaultEntry(body, id);
+  }
+
+  @Delete('password-vault/:id')
+  deletePasswordVaultEntry(@Param('id') id: string) {
+    return this.upstreams.deletePasswordVaultEntry(id);
+  }
+
   @Get(':id/cpa-pool')
   cpaPool(@Param('id') id: string) {
     return this.upstreams.cpaPool(id);

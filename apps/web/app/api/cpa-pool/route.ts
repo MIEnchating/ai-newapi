@@ -3,6 +3,7 @@ import { getStore, mergePersistentChannels, type CpaUsageRecord } from '../store
 import { requireAuth } from '../auth/session';
 import { fetchBackendCpaPool, listBackendChannels } from '../backend-upstreams';
 
+const usageFiveHourMs = 5 * 60 * 60_000;
 const usageRetentionMs = 7 * 24 * 60 * 60_000;
 
 export async function GET(request: Request) {
@@ -86,7 +87,9 @@ export async function GET(request: Request) {
     return {
       ...account,
       successCount: account.successCount || usage.successCount,
-      failureCount: account.failureCount || usage.failureCount
+      failureCount: account.failureCount || usage.failureCount,
+      usage5h: mergeUsageMetric(account.usage5h, usage.usage5h),
+      usage7d: mergeUsageMetric(account.usage7d, usage.usage7d)
     };
   });
 
@@ -193,6 +196,38 @@ function parseAuthFiles(value: unknown) {
         usageMetricFromPair(firstDefined(record.week_used, record.weekUsed, record.weekly_used, record.weeklyUsed, record.usage_7d_used, record.usage7dUsed, record.used_7d, record.used7d), firstDefined(record.week_limit, record.weekLimit, record.weekly_limit, record.weeklyLimit, record.usage_7d_limit, record.usage7dLimit, record.limit_7d, record.limit7d)),
         usageMetricFromPair(firstDefined(record.week_usage, record.weekUsage, record.weekly_usage, record.weeklyUsage), firstDefined(record.week_limit, record.weekLimit, record.weekly_limit, record.weeklyLimit))
       ),
+    usageLimit5h: usageLimitValue(
+      record.usage_5h,
+      record.usage5h,
+      record.usage_5_hours,
+      record.usage5Hours,
+      record.five_hour,
+      record.fiveHour,
+      record.five_hours,
+      record.fiveHours,
+      record.five_hour_limit,
+      record.fiveHourLimit,
+      record.five_hours_limit,
+      record.fiveHoursLimit,
+      record.usage_5h_limit,
+      record.usage5hLimit,
+      record.limit_5h,
+      record.limit5h
+    ),
+    usageLimit7d: usageLimitValue(
+      record.usage_7d,
+      record.usage7d,
+      record.week,
+      record.weekly,
+      record.week_limit,
+      record.weekLimit,
+      record.weekly_limit,
+      record.weeklyLimit,
+      record.usage_7d_limit,
+      record.usage7dLimit,
+      record.limit_7d,
+      record.limit7d
+    ),
     lastRefresh:
       stringValue(record.last_refresh) ??
       stringValue(record.lastRefresh) ??
@@ -208,30 +243,80 @@ function parseAuthFiles(value: unknown) {
 }
 
 function parseUsageRecords(value: unknown): CpaUsageRecord[] {
-  return arrayOfRecords(value).map((record) => ({
-    timestamp: stringValue(record.timestamp) ?? stringValue(record.time) ?? stringValue(record.created_at) ?? new Date().toISOString(),
-    authIndex: stringValue(record.auth_index) ?? stringValue(record.authIndex) ?? stringValue(record.index) ?? stringValue(record.file) ?? stringValue(record.name),
-    source: stringValue(record.source) ?? stringValue(record.model),
-    totalTokens:
-      numeric(record.total_tokens) ??
-      numeric(record.totalTokens) ??
-      numeric(record.tokens) ??
-      numeric(recordValue(record.tokens)?.total_tokens) ??
-      numeric(recordValue(record.tokens)?.totalTokens) ??
-      numeric(recordValue(record.usage)?.total_tokens) ??
-      numeric(recordValue(record.usage)?.totalTokens) ??
-      (numeric(record.prompt_tokens) ?? 0) + (numeric(record.completion_tokens) ?? 0),
-    failed: booleanValue(record.failed) === true || ['failed', 'error'].includes(stringValue(record.status)?.toLowerCase() ?? '')
-  })).filter((record) => Number.isFinite(Date.parse(record.timestamp)));
+  return arrayOfRecords(value).map((record) => {
+    const authRecord = recordValue(record.auth) ?? recordValue(record.account);
+    const tokenRecord = recordValue(record.tokens);
+    const usageRecord = recordValue(record.usage);
+    const promptTokens = firstNumeric(
+      record.prompt_tokens,
+      record.promptTokens,
+      record.input_tokens,
+      record.inputTokens,
+      tokenRecord?.prompt_tokens,
+      tokenRecord?.promptTokens,
+      tokenRecord?.input_tokens,
+      tokenRecord?.inputTokens,
+      usageRecord?.prompt_tokens,
+      usageRecord?.promptTokens,
+      usageRecord?.input_tokens,
+      usageRecord?.inputTokens
+    );
+    const completionTokens = firstNumeric(
+      record.completion_tokens,
+      record.completionTokens,
+      record.output_tokens,
+      record.outputTokens,
+      tokenRecord?.completion_tokens,
+      tokenRecord?.completionTokens,
+      tokenRecord?.output_tokens,
+      tokenRecord?.outputTokens,
+      usageRecord?.completion_tokens,
+      usageRecord?.completionTokens,
+      usageRecord?.output_tokens,
+      usageRecord?.outputTokens
+    );
+    const totalTokens = firstNumeric(
+      record.total_tokens,
+      record.totalTokens,
+      record.tokens,
+      record.token_count,
+      record.tokenCount,
+      tokenRecord?.total_tokens,
+      tokenRecord?.totalTokens,
+      tokenRecord?.total,
+      usageRecord?.total_tokens,
+      usageRecord?.totalTokens,
+      usageRecord?.total
+    ) ?? (promptTokens ?? 0) + (completionTokens ?? 0);
+
+    return {
+      timestamp: stringValue(record.timestamp) ?? stringValue(record.time) ?? stringValue(record.created_at) ?? new Date().toISOString(),
+      authIndex: stringValue(firstDefined(record.auth_index, record.authIndex, record.index, record.auth_file, record.authFile, record.file, record.name, authRecord?.index, authRecord?.id, authRecord?.name)),
+      source: stringValue(firstDefined(record.source, record.email, record.account, record.username, authRecord?.email, authRecord?.account, authRecord?.username)),
+      totalTokens,
+      failed: booleanValue(record.failed) === true || ['failed', 'error'].includes(stringValue(record.status)?.toLowerCase() ?? '')
+    };
+  }).filter((record) => Number.isFinite(Date.parse(record.timestamp)));
 }
 
-function aggregateUsage(records: CpaUsageRecord[], account: { index: string; key: string; name: string }, index: number) {
-  const keys = new Set([account.index, account.key, account.name, String(index)]);
+function aggregateUsage(
+  records: CpaUsageRecord[],
+  account: { index: string; key: string; name: string; account?: string; usageLimit5h?: number | null; usageLimit7d?: number | null },
+  index: number
+) {
+  const keys = usageAccountKeys(account, index);
+  const nowMs = Date.now();
+  const fiveHourCutoff = nowMs - usageFiveHourMs;
+  const weekCutoff = nowMs - usageRetentionMs;
   let successCount = 0;
   let failureCount = 0;
+  let used5h = 0;
+  let used7d = 0;
+  let observed5h = false;
+  let observed7d = false;
 
   for (const record of records) {
-    if (record.authIndex && !keys.has(record.authIndex)) {
+    if (!usageRecordMatchesAccount(record, keys)) {
       continue;
     }
 
@@ -241,9 +326,77 @@ function aggregateUsage(records: CpaUsageRecord[], account: { index: string; key
     }
 
     successCount += 1;
+    const timestamp = Date.parse(record.timestamp);
+    const amount = Number.isFinite(record.totalTokens) ? Math.max(0, record.totalTokens) : 0;
+
+    if (timestamp >= weekCutoff) {
+      observed7d = true;
+      used7d += amount;
+    }
+    if (timestamp >= fiveHourCutoff) {
+      observed5h = true;
+      used5h += amount;
+    }
   }
 
-  return { successCount, failureCount };
+  return {
+    successCount,
+    failureCount,
+    usage5h: usageMetricFromCollected(used5h, account.usageLimit5h, observed5h),
+    usage7d: usageMetricFromCollected(used7d, account.usageLimit7d, observed7d)
+  };
+}
+
+function usageAccountKeys(account: { index: string; key: string; name: string; account?: string }, index: number) {
+  return new Set([account.index, account.key, account.name, account.account, String(index)]
+    .map(normalizeUsageKey)
+    .filter((value): value is string => Boolean(value)));
+}
+
+function usageRecordMatchesAccount(record: CpaUsageRecord, keys: Set<string>) {
+  const candidates = [record.authIndex, record.source].map(normalizeUsageKey).filter((value): value is string => Boolean(value));
+
+  if (candidates.length === 0) {
+    return true;
+  }
+
+  return candidates.some((candidate) => keys.has(candidate));
+}
+
+function normalizeUsageKey(value: unknown) {
+  return String(value ?? '').trim().toLowerCase() || null;
+}
+
+function usageMetricFromCollected(used: number, limit: number | null | undefined, observed: boolean) {
+  if (!observed) {
+    return null;
+  }
+  if (limit !== null && limit !== undefined && limit > 0) {
+    return usageMetricFromPair(used, limit);
+  }
+
+  return {
+    percent: null,
+    used,
+    limit: null,
+    label: `${formatUsageNumber(used)} tokens`
+  };
+}
+
+function mergeUsageMetric(existing: { percent: number | null; used?: number | null; limit?: number | null; label?: string | null } | null, collected: { percent: number | null; used?: number | null; limit?: number | null; label?: string | null } | null) {
+  if (!existing) {
+    return collected;
+  }
+  if (!collected) {
+    return existing;
+  }
+
+  return {
+    percent: collected.percent ?? existing.percent,
+    used: collected.used ?? existing.used,
+    limit: collected.limit ?? existing.limit,
+    label: collected.label ?? existing.label
+  };
 }
 
 function accountStatus(record: Record<string, unknown>) {
@@ -430,6 +583,22 @@ function usageMetricFromPair(usedValue: unknown, limitValue: unknown) {
     limit,
     label: `${formatUsageNumber(used)} / ${formatUsageNumber(limit)}`
   };
+}
+
+function usageLimitValue(...values: unknown[]) {
+  for (const value of values) {
+    const parsed = numeric(value);
+    if (parsed !== undefined && parsed > 0) {
+      return parsed;
+    }
+
+    const metric = usageMetricFromValue(value);
+    if (metric?.limit !== null && metric?.limit !== undefined && metric.limit > 0) {
+      return metric.limit;
+    }
+  }
+
+  return null;
 }
 
 function firstDefined(...values: unknown[]) {

@@ -140,6 +140,21 @@ export type RelayInput = {
   adminToken?: string;
 };
 
+export type PasswordVaultEntry = {
+  id: string;
+  name: string;
+  provider: 'newapi' | 'sub2api';
+  baseUrl: string | null;
+  account: string;
+  lastUsedAt?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type PasswordVaultEntryDetail = PasswordVaultEntry & {
+  password: string;
+};
+
 type BackendMainStation = {
   id: string;
   name: string;
@@ -333,6 +348,38 @@ export async function deleteBackendChannel(id: string) {
 
 export async function fetchBackendCpaPool(id: string) {
   return backendJson<BackendCpaPool>(`/upstreams/${encodeURIComponent(id)}/cpa-pool`);
+}
+
+export async function listBackendPasswordVaultEntries() {
+  return backendJson<PasswordVaultEntry[]>('/upstreams/password-vault');
+}
+
+export async function revealBackendPasswordVaultEntry(id: string) {
+  return backendJson<PasswordVaultEntryDetail>(`/upstreams/password-vault/${encodeURIComponent(id)}`);
+}
+
+export async function saveBackendPasswordVaultEntry(input: {
+  id?: string;
+  name?: string;
+  provider?: 'newapi' | 'sub2api';
+  baseUrl?: string | null;
+  account?: string;
+  password?: string;
+}) {
+  const method = input.id ? 'PATCH' : 'POST';
+  const path = input.id ? `/upstreams/password-vault/${encodeURIComponent(input.id)}` : '/upstreams/password-vault';
+
+  return backendJson<PasswordVaultEntry>(path, {
+    method,
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(input)
+  });
+}
+
+export async function deleteBackendPasswordVaultEntry(id: string) {
+  return backendJson<{ deleted: true; id: string }>(`/upstreams/password-vault/${encodeURIComponent(id)}`, {
+    method: 'DELETE'
+  });
 }
 
 export async function syncBackendChannel(id: string) {
