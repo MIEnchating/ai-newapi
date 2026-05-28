@@ -138,6 +138,8 @@ export type RelayInput = {
   auth?: string;
   adminUserId?: string;
   adminToken?: string;
+  adminAccount?: string;
+  adminPassword?: string;
 };
 
 export type PasswordVaultEntry = {
@@ -263,6 +265,14 @@ export async function updateBackendRelay(input: RelayInput, channelCount = 0) {
   });
 
   return toRelayRecord(relay, channelCount);
+}
+
+export async function testBackendRelay(input: RelayInput) {
+  return backendJson<CredentialTestResult>('/main-station/test', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(input)
+  });
 }
 
 export async function syncMainStationChannels() {
@@ -786,7 +796,7 @@ function authLabel(authMode: BackendUpstream['authMode'], upstreamType: Upstream
 }
 
 function toRelayRecord(relay: BackendMainStation, channelCount: number): RelayRecord {
-  const configured = relay.baseUrl !== '待配置' && relay.tokenConfigured && Boolean(relay.adminUserId);
+  const configured = relay.baseUrl !== '待配置' && relay.tokenConfigured && (relay.auth === '账号密码' || Boolean(relay.adminUserId));
   const failed = configured && Boolean(relay.lastError);
 
   return {

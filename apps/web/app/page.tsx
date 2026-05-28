@@ -68,7 +68,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 const { Header, Sider, Content } = Layout;
 const { Text, Title, Paragraph } = Typography;
 
-type View = 'overview' | 'channels' | 'rates' | 'credentials' | 'inspection' | 'cpaPool' | 'alerts';
+type View = 'overview' | 'channels' | 'rates' | 'credentials' | 'passwordVault' | 'inspection' | 'cpaPool' | 'alerts';
 type ThemeMode = 'light' | 'dark';
 type RelayType = 'newapi';
 type UpstreamProvider = 'newapi' | 'sub2api' | 'cli_proxy';
@@ -77,7 +77,6 @@ type StatusTone = 'ok' | 'warn' | 'limited' | 'error';
 type RateFilter = 'all' | 'changed' | 'limited';
 type ProviderFilter = 'all' | UpstreamProvider;
 type CredentialMode = 'server' | 'none';
-const MAIN_STATION_GROUP_ALL = '__all_main_station_groups__';
 const THEME_STORAGE_KEY = 'relaydesk.theme';
 
 type AuthStatus = {
@@ -403,6 +402,14 @@ type RelayForm = {
   auth: string;
   adminUserId: string;
   adminToken?: string;
+  adminAccount?: string;
+  adminPassword?: string;
+};
+
+type PasswordVaultForm = {
+  name?: string;
+  account: string;
+  password: string;
 };
 
 const initialRelays: RelayView[] = [
@@ -508,6 +515,43 @@ function errorMessage(error: unknown) {
   return String(error);
 }
 
+function relayErrorField(error?: string): keyof RelayForm {
+  if (error?.includes('adminAccount')) {
+    return 'adminAccount';
+  }
+  if (error?.includes('adminPassword')) {
+    return 'adminPassword';
+  }
+  if (error?.includes('adminUserId')) {
+    return 'adminUserId';
+  }
+  if (error?.includes('baseUrl')) {
+    return 'baseUrl';
+  }
+
+  return 'adminToken';
+}
+
+function relayErrorText(error: string) {
+  if (error === 'admin token is required') {
+    return '请输入管理 Token';
+  }
+  if (error === 'adminUserId is required') {
+    return '请输入管理员用户 ID';
+  }
+  if (error === 'adminAccount is required') {
+    return '请输入管理员账号或邮箱';
+  }
+  if (error === 'adminPassword is required') {
+    return '请输入管理员密码';
+  }
+  if (error === 'baseUrl and auth are required' || error === 'name, baseUrl and auth are required') {
+    return '请填写主站地址和认证方式';
+  }
+
+  return error;
+}
+
 function initialThemeMode(): ThemeMode {
   if (typeof window === 'undefined') {
     return 'dark';
@@ -543,19 +587,23 @@ function buildAntTheme(mode: ThemeMode) {
     components: {
       Button: {
         borderRadius: 6,
-        controlHeight: 34,
+        controlHeight: 36,
         primaryShadow: 'none'
       },
       Input: {
         borderRadius: 6,
-        controlHeight: 34,
+        controlHeight: 36,
         activeShadow: dark ? '0 0 0 2px rgba(0, 114, 245, 0.18)' : '0 0 0 2px rgba(0, 114, 245, 0.12)'
       },
       Select: {
         borderRadius: 6,
-        controlHeight: 34,
+        controlHeight: 36,
         optionSelectedBg: dark ? '#2a3340' : '#e8f3ff',
         optionActiveBg: dark ? '#262a32' : '#f3f8ff'
+      },
+      InputNumber: {
+        borderRadius: 6,
+        controlHeight: 36
       },
       Layout: {
         bodyBg: dark ? '#14161a' : '#f5f7fb',
@@ -638,9 +686,13 @@ export default function DashboardPage() {
   const [passwordVaultEntries, setPasswordVaultEntries] = useState<PasswordVaultEntryView[]>([]);
   const [passwordVaultLoading, setPasswordVaultLoading] = useState(false);
   const [passwordVaultSaving, setPasswordVaultSaving] = useState(false);
+  const [passwordVaultModalOpen, setPasswordVaultModalOpen] = useState(false);
+  const [savingPasswordVaultEntry, setSavingPasswordVaultEntry] = useState(false);
   const [deletingPasswordVaultId, setDeletingPasswordVaultId] = useState<string | null>(null);
   const [relayModalOpen, setRelayModalOpen] = useState(false);
-  const [mainStationGroupFilter, setMainStationGroupFilter] = useState(MAIN_STATION_GROUP_ALL);
+  const [savingRelay, setSavingRelay] = useState(false);
+  const [testingRelayCredential, setTestingRelayCredential] = useState(false);
+  const [relayCredentialTestResult, setRelayCredentialTestResult] = useState<CredentialTestResult | null>(null);
   const [relays, setRelays] = useState(initialRelays);
   const [channels, setChannels] = useState(initialChannels);
   const [events, setEvents] = useState(initialEvents);
@@ -652,10 +704,12 @@ export default function DashboardPage() {
   const [form] = Form.useForm<ChannelForm>();
   const [credentialForm] = Form.useForm<PlatformCredentialForm>();
   const [relayForm] = Form.useForm<RelayForm>();
+  const [passwordVaultForm] = Form.useForm<PasswordVaultForm>();
   const [messageApi, contextHolder] = message.useMessage();
   const watchedChannelBaseUrl = Form.useWatch('upstreamBaseUrl', form);
   const watchedUpstreamName = Form.useWatch('upstreamName', form);
   const watchedUpstreamType = Form.useWatch('upstreamType', form);
+  const watchedRelayAuth = Form.useWatch('auth', relayForm);
   const autoFilledSiteUrlRef = useRef('');
   const isDarkTheme = themeMode === 'dark';
 
@@ -668,20 +722,13 @@ export default function DashboardPage() {
     () => channels.find((channel) => channel.id === editingChannelId),
     [channels, editingChannelId]
   );
-  const mainStationGroupFilterOptions = useMemo(
-    () => buildMainStationGroupFilterOptions(activeChannels, mainStationGroups),
-    [activeChannels, mainStationGroups]
-  );
 
   const visibleChannels = useMemo(() => {
     return activeChannels.filter((channel) => {
       const matchesProvider = providerFilter === 'all' || channel.upstreamType === providerFilter;
-      const matchesMainStationGroup =
-        mainStationGroupFilter === MAIN_STATION_GROUP_ALL ||
-        mainStationGroupLabel(channel) === mainStationGroupFilter;
-      return matchesProvider && matchesMainStationGroup;
+      return matchesProvider;
     });
-  }, [activeChannels, mainStationGroupFilter, providerFilter]);
+  }, [activeChannels, providerFilter]);
   const visibleChannelGroups = useMemo(() => groupChannelsByPlatform(visibleChannels), [visibleChannels]);
   const credentialGroups = useMemo(() => buildCredentialGroups(activeChannels), [activeChannels]);
   const mainStationGroupOptions = useMemo(
@@ -849,6 +896,17 @@ export default function DashboardPage() {
 
   async function applyPasswordVaultEntry(entryId: string | undefined, target: 'channel' | 'credential') {
     if (!entryId) {
+      const fields = {
+        passwordVaultId: undefined,
+        credentialAccount: '',
+        credentialPassword: ''
+      };
+
+      if (target === 'channel') {
+        form.setFieldsValue(fields);
+      } else {
+        credentialForm.setFieldsValue(fields);
+      }
       return;
     }
 
@@ -877,14 +935,13 @@ export default function DashboardPage() {
   }
 
   async function savePasswordVaultFromForm(
-    target: 'channel' | 'credential',
-    provider: 'newapi' | 'sub2api',
-    options: { baseUrl?: string; name?: string } = {}
+    target: 'channel' | 'credential'
   ) {
     const values = target === 'channel' ? form.getFieldsValue() : credentialForm.getFieldsValue();
     const id = values.passwordVaultId?.trim();
     const account = values.credentialAccount?.trim();
     const password = values.credentialPassword?.trim();
+    const existingEntry = passwordVaultEntries.find((entry) => entry.id === id);
 
     if (!account || !password) {
       const fieldErrors = [
@@ -907,9 +964,9 @@ export default function DashboardPage() {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           id,
-          name: options.name?.trim() || account,
-          provider,
-          baseUrl: options.baseUrl?.trim(),
+          name: existingEntry?.name || account,
+          provider: 'newapi',
+          baseUrl: null,
           account,
           password
         })
@@ -955,6 +1012,49 @@ export default function DashboardPage() {
     }
   }
 
+  function openPasswordVaultModal() {
+    passwordVaultForm.resetFields();
+    setPasswordVaultModalOpen(true);
+  }
+
+  async function savePasswordVaultEntryFromModal() {
+    const values = await validateFormOrStop(passwordVaultForm, messageApi.warning);
+    if (!values) {
+      return;
+    }
+
+    setSavingPasswordVaultEntry(true);
+    try {
+      const response = await fetch('/api/password-vault', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          name: values.name?.trim() || values.account.trim(),
+          provider: 'newapi',
+          baseUrl: null,
+          account: values.account.trim(),
+          password: values.password.trim()
+        })
+      });
+      const payload = (await response.json().catch(() => ({}))) as {
+        entry?: PasswordVaultEntryView;
+        entries?: PasswordVaultEntryView[];
+        error?: string;
+      };
+
+      if (!response.ok || !payload.entry) {
+        messageApi.error(payload.error ?? '保存密码箱账号失败');
+        return;
+      }
+
+      setPasswordVaultEntries(payload.entries ?? [payload.entry, ...passwordVaultEntries.filter((entry) => entry.id !== payload.entry?.id)]);
+      setPasswordVaultModalOpen(false);
+      messageApi.success('密码箱账号已保存');
+    } finally {
+      setSavingPasswordVaultEntry(false);
+    }
+  }
+
   async function logout() {
     await fetch('/api/auth/logout', { method: 'POST' });
     setAuthStatus({ setupRequired: false, authenticated: false });
@@ -977,6 +1077,7 @@ export default function DashboardPage() {
     { key: 'channels', icon: <CloudOutlined />, label: '渠道管理' },
     { key: 'rates', icon: <ThunderboltOutlined />, label: '倍率快照' },
     { key: 'credentials', icon: <KeyOutlined />, label: '平台凭证' },
+    { key: 'passwordVault', icon: <LockOutlined />, label: '密码箱' },
     { key: 'inspection', icon: <FieldTimeOutlined />, label: '自动巡检' },
     { key: 'cpaPool', icon: <DatabaseOutlined />, label: '号池管理' },
     { key: 'alerts', icon: <BellOutlined />, label: '告警' }
@@ -1456,13 +1557,16 @@ export default function DashboardPage() {
       return;
     }
 
+    setRelayCredentialTestResult(null);
     relayForm.setFieldsValue({
       id: relay.id,
       name: relay.name,
       baseUrl: relay.baseUrl === '待配置' ? '' : relay.baseUrl,
-      auth: relay.auth,
+      auth: relay.auth === '用户登录' ? '账号密码' : relay.auth,
       adminUserId: relay.adminUserId,
-      adminToken: undefined
+      adminToken: undefined,
+      adminAccount: '',
+      adminPassword: undefined
     });
     setRelayModalOpen(true);
   }
@@ -1472,26 +1576,77 @@ export default function DashboardPage() {
     if (!values) {
       return;
     }
-    const response = await fetch('/api/relays', {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(values)
-    });
-    if (!response.ok) {
-      const payload = (await response.json()) as { error?: string };
-      const fieldName = payload.error?.includes('adminUserId') ? 'adminUserId' : 'adminToken';
-      relayForm.setFields([
-        {
-          name: fieldName,
-          errors: [payload.error === 'admin token is required' ? '请输入管理 Token' : payload.error ?? '保存失败']
-        }
-      ]);
+
+    setSavingRelay(true);
+    try {
+      const response = await fetch('/api/relays', {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(values)
+      });
+      const payload = (await response.json().catch(() => ({}))) as { relays?: RelayView[]; events?: EventItem[]; error?: string };
+
+      if (!response.ok) {
+        const fieldName = relayErrorField(payload.error);
+        const error = relayErrorText(payload.error ?? '保存失败');
+        relayForm.setFields([{ name: fieldName, errors: [error] }]);
+        relayForm.scrollToField(fieldName);
+        messageApi.error(error);
+        return;
+      }
+
+      if (payload.relays) {
+        setRelays(payload.relays);
+      }
+      if (payload.events) {
+        setEvents(payload.events);
+      }
+      setRelayCredentialTestResult(null);
+      setRelayModalOpen(false);
+      messageApi.success('主站配置已保存');
+    } catch (error) {
+      messageApi.error(`主站配置保存失败：${errorMessage(error)}`);
+    } finally {
+      setSavingRelay(false);
+    }
+  }
+
+  async function testRelayCredential() {
+    const values = await validateFormOrStop(relayForm, messageApi.warning);
+    if (!values) {
       return;
     }
-    const payload = (await response.json()) as { relays: RelayView[]; events: EventItem[] };
-    setRelays(payload.relays);
-    setEvents(payload.events);
-    setRelayModalOpen(false);
+
+    setTestingRelayCredential(true);
+    try {
+      const response = await fetch('/api/relays/test', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(values)
+      });
+      const payload = (await response.json().catch(() => ({}))) as Partial<CredentialTestResult> & { error?: string };
+
+      if (!response.ok) {
+        const error = errorMessage(payload.error ?? '主站凭证测试失败');
+        setRelayCredentialTestResult({ ok: false, status: 'error', message: error });
+        messageApi.error(error);
+        return;
+      }
+
+      const result = payload as CredentialTestResult;
+      setRelayCredentialTestResult(result);
+      if (result.status === 'ok') {
+        messageApi.success('主站凭证测试通过');
+      } else {
+        messageApi.warning(result.message || '主站凭证可用性不完整');
+      }
+    } catch (error) {
+      const message = `主站凭证测试失败：${errorMessage(error)}`;
+      setRelayCredentialTestResult({ ok: false, status: 'error', message });
+      messageApi.error(message);
+    } finally {
+      setTestingRelayCredential(false);
+    }
   }
 
   async function detectChannelUpstreamType() {
@@ -1739,7 +1894,7 @@ export default function DashboardPage() {
       return fieldErrors;
     }
     if (upstreamType === 'cli_proxy') {
-      fieldErrors.push({ name: 'upstreamType', errors: ['CPA 号池不需要读取凭证'] });
+      fieldErrors.push({ name: 'upstreamType', errors: ['号池模式不需要读取凭证'] });
       return fieldErrors;
     }
     if (!values.group?.trim()) {
@@ -1872,6 +2027,80 @@ export default function DashboardPage() {
       form.setFieldValue('keyName', upstreamGroup.remark?.trim() || upstreamGroup.name);
     }
     messageApi.success(`已填入上游分组 ${upstreamGroup.name}`);
+  }
+
+  function renderChannelConnectionSection() {
+    return (
+      <FormSection title="上游连接" description="先配置上游地址和类型，再补平台分组、Key 名称和凭证。">
+        <Form.Item label="上游 Base URL" required>
+          <Space.Compact className="full-width">
+            <Form.Item name="upstreamBaseUrl" noStyle rules={[{ required: true, message: '请输入上游地址' }]}>
+              <Input placeholder="https://relay.example.com" onBlur={() => void fillChannelNameFromUrl()} />
+            </Form.Item>
+            <Button htmlType="button" icon={<SearchOutlined />} loading={detectingUpstreamType} onClick={detectChannelUpstreamType}>
+              识别类型
+            </Button>
+          </Space.Compact>
+        </Form.Item>
+        <Form.Item
+          name="upstreamType"
+          label="渠道上游类型"
+          rules={[
+            {
+              validator: (_, value) => {
+                if (isKnownUpstreamType(value)) {
+                  return Promise.resolve();
+                }
+
+                return Promise.reject(new Error(value === 'unknown' ? '未识别出类型，请手动选择' : '请先识别或选择上游类型'));
+              }
+            }
+          ]}
+        >
+          <Select
+            placeholder="先输入地址识别，识别失败手动选择"
+            options={[
+              { label: '未知（请手动选择）', value: 'unknown', disabled: true },
+              { label: upstreamProviderLabel('newapi'), value: 'newapi' },
+              { label: upstreamProviderLabel('sub2api'), value: 'sub2api' },
+              { label: '号池模式', value: 'cli_proxy' }
+            ]}
+          />
+        </Form.Item>
+        <Form.Item name="auth" hidden>
+          <Input />
+        </Form.Item>
+        <Form.Item noStyle shouldUpdate={(prev, next) => prev.upstreamType !== next.upstreamType || prev.auth !== next.auth}>
+          {({ getFieldValue }) => {
+            const type = getFieldValue('upstreamType');
+            if (!isKnownUpstreamType(type)) {
+              return (
+                <AuthHint
+                  type={type}
+                  auth={getFieldValue('auth')}
+                  prefix={upstreamTypeHint?.type === 'unknown' ? '未识别出渠道类型，请手动选择。' : undefined}
+                />
+              );
+            }
+
+            const prefix = upstreamTypeHint && upstreamTypeHint.type !== 'unknown'
+              ? `已识别并选中：${upstreamProviderLabel(upstreamTypeHint.type)}。`
+              : undefined;
+
+            return type === 'cli_proxy' ? (
+              <AuthHint type={type} auth={getFieldValue('auth')} prefix={prefix} />
+            ) : (
+              <AuthHint
+                type={type}
+                auth={getFieldValue('auth')}
+                prefix={prefix}
+                suffix="渠道保存后到“平台凭证”配置 Token 或账号密码；同平台分组共用一套凭证。"
+              />
+            );
+          }}
+        </Form.Item>
+      </FormSection>
+    );
   }
 
   async function createMainStationGroup() {
@@ -2070,6 +2299,10 @@ export default function DashboardPage() {
 
   const showSystemLoading = authChecking || (authStatus?.authenticated && (!dashboardLoaded || dashboardLoading));
   const systemLoadingDetail = authChecking ? '正在验证登录状态' : '正在加载系统数据';
+  const relayAuthMode = watchedRelayAuth ?? '管理 Token';
+  const relayHasLoginCredential = Boolean(selectedRelay?.tokenConfigured && (selectedRelay.auth === '账号密码' || selectedRelay.auth === '用户登录'));
+  const relayLoginCredentialRequired = relayAuthMode === '账号密码' && !relayHasLoginCredential;
+  const relayTokenRequired = relayAuthMode === '管理 Token' && (!selectedRelay?.tokenConfigured || selectedRelay.auth !== '管理 Token');
 
   return (
     <ConfigProvider
@@ -2126,11 +2359,7 @@ export default function DashboardPage() {
                 />
               </Tooltip>
               <div className="header-title">
-                <div className="header-breadcrumb">
-                  <span>首页</span>
-                  <span>/</span>
-                  <span>{viewTitle(activeView)}</span>
-                </div>
+                <div className="header-breadcrumb">{viewDescription(activeView)}</div>
                 <div className="header-title-row">
                   <Title level={4}>{viewTitle(activeView)}</Title>
                   {selectedRelay ? <StatusTag tone={selectedRelay.statusTone}>{selectedRelay.status}</StatusTag> : null}
@@ -2138,16 +2367,6 @@ export default function DashboardPage() {
               </div>
             </div>
             <div className="header-actions">
-              <div className="header-filter-group">
-                <Select
-                  className="main-station-group-filter"
-                  value={mainStationGroupFilter}
-                  options={mainStationGroupFilterOptions}
-                  onChange={setMainStationGroupFilter}
-                  optionFilterProp="label"
-                  showSearch
-                />
-              </div>
               <div className="header-utility-group">
                 <Tooltip title="告警中心">
                   <Badge count={warningEventCount} size="small" overflowCount={99}>
@@ -2186,19 +2405,6 @@ export default function DashboardPage() {
           </Header>
 
           <Content className="app-content">
-            <div className="content-hero">
-              <div>
-                <Text className="content-eyebrow">RelayDesk</Text>
-                <Title level={3}>{viewTitle(activeView)}</Title>
-                <Text type="secondary">{viewDescription(activeView)}</Text>
-              </div>
-              <Space size={8} wrap>
-                <Tag color="blue">控制台</Tag>
-                <Tag>{activeChannels.length} 渠道</Tag>
-                <Tag>{readableCount} 已同步</Tag>
-              </Space>
-            </div>
-
             {activeView === 'overview' ? (
               <OverviewView
                 selectedRelay={selectedRelay}
@@ -2247,9 +2453,9 @@ export default function DashboardPage() {
                         onChange={(value) => setProviderFilter(value as ProviderFilter)}
                         options={[
                           { label: '全部', value: 'all' },
-                          { label: 'NewAPI', value: 'newapi' },
-                          { label: 'Sub2API', value: 'sub2api' },
-                          { label: 'CPA 号池', value: 'cli_proxy' }
+                          { label: upstreamProviderLabel('newapi'), value: 'newapi' },
+                          { label: upstreamProviderLabel('sub2api'), value: 'sub2api' },
+                          { label: upstreamProviderLabel('cli_proxy'), value: 'cli_proxy' }
                         ]}
                       />
                     </Space>
@@ -2284,12 +2490,19 @@ export default function DashboardPage() {
             {activeView === 'credentials' ? (
               <CredentialsView
                 groups={visibleCredentialGroups}
-                passwordVaultEntries={passwordVaultEntries}
-                passwordVaultLoading={passwordVaultLoading}
-                deletingPasswordVaultId={deletingPasswordVaultId}
                 onEditGroup={openCredentialModal}
-                onReloadPasswordVault={loadPasswordVault}
-                onDeletePasswordVault={deletePasswordVaultEntry}
+              />
+            ) : null}
+
+            {activeView === 'passwordVault' ? (
+              <PasswordVaultCard
+                entries={passwordVaultEntries}
+                loading={passwordVaultLoading}
+                saving={savingPasswordVaultEntry}
+                deletingId={deletingPasswordVaultId}
+                onAdd={openPasswordVaultModal}
+                onReload={loadPasswordVault}
+                onDelete={deletePasswordVaultEntry}
               />
             ) : null}
 
@@ -2432,6 +2645,7 @@ export default function DashboardPage() {
           <Form.Item name="relayId" hidden>
             <Input />
           </Form.Item>
+          {renderChannelConnectionSection()}
           <FormSection title="基本信息" description="平台分组从渠道名第一个 - 或 _ 自动拆；这里只保存上游分组名，倍率值只来自上游同步结果。">
             <Form.Item noStyle shouldUpdate={(prev, next) => prev.upstreamType !== next.upstreamType}>
               {({ getFieldValue }) => {
@@ -2485,7 +2699,7 @@ export default function DashboardPage() {
               {({ getFieldValue }) =>
                 getFieldValue('upstreamType') === 'cli_proxy' ? (
                   <div className="form-note">
-                    <Text type="secondary">CPA 是号池模式，没有上游 Key 名称和倍率分组，保存时只使用平台分组作为渠道名。</Text>
+                    <Text type="secondary">号池模式没有上游 Key 名称和倍率分组，保存时只使用平台分组作为渠道名。</Text>
                   </div>
                 ) : (
                   <Row gutter={12}>
@@ -2534,76 +2748,6 @@ export default function DashboardPage() {
             </Form.Item>
           </FormSection>
 
-          <FormSection title="上游连接" description="输入地址后自动填平台分组；识别成功会自动选中渠道类型，识别失败再手动选择。">
-            <Form.Item label="上游 Base URL" required>
-              <Space.Compact className="full-width">
-                <Form.Item name="upstreamBaseUrl" noStyle rules={[{ required: true, message: '请输入上游地址' }]}>
-                  <Input placeholder="https://relay.example.com" onBlur={() => void fillChannelNameFromUrl()} />
-                </Form.Item>
-                <Button htmlType="button" icon={<SearchOutlined />} loading={detectingUpstreamType} onClick={detectChannelUpstreamType}>
-                  识别类型
-                </Button>
-              </Space.Compact>
-            </Form.Item>
-            <Form.Item
-              name="upstreamType"
-              label="渠道上游类型"
-              rules={[
-                {
-                  validator: (_, value) => {
-                    if (isKnownUpstreamType(value)) {
-                      return Promise.resolve();
-                    }
-
-                    return Promise.reject(new Error(value === 'unknown' ? '未识别出类型，请手动选择' : '请先识别或选择上游类型'));
-                  }
-                }
-              ]}
-            >
-              <Select
-                placeholder="先输入地址识别，识别失败手动选择"
-                options={[
-                  { label: '未知（请手动选择）', value: 'unknown', disabled: true },
-                  { label: 'NewAPI', value: 'newapi' },
-                  { label: 'Sub2API', value: 'sub2api' },
-                  { label: 'CPA（号池模式）', value: 'cli_proxy' }
-                ]}
-              />
-            </Form.Item>
-            <Form.Item name="auth" hidden>
-              <Input />
-            </Form.Item>
-            <Form.Item noStyle shouldUpdate={(prev, next) => prev.upstreamType !== next.upstreamType || prev.auth !== next.auth}>
-              {({ getFieldValue }) => {
-                const type = getFieldValue('upstreamType');
-                if (!isKnownUpstreamType(type)) {
-                  return (
-                    <AuthHint
-                      type={type}
-                      auth={getFieldValue('auth')}
-                      prefix={upstreamTypeHint?.type === 'unknown' ? '未识别出渠道类型，请手动选择。' : undefined}
-                    />
-                  );
-                }
-
-                const prefix = upstreamTypeHint && upstreamTypeHint.type !== 'unknown'
-                  ? `已识别并选中：${upstreamProviderLabel(upstreamTypeHint.type)}。`
-                  : undefined;
-
-                return type === 'cli_proxy' ? (
-                  <AuthHint type={type} auth={getFieldValue('auth')} prefix={prefix} />
-                ) : (
-                  <AuthHint
-                    type={type}
-                    auth={getFieldValue('auth')}
-                    prefix={prefix}
-                    suffix="渠道保存后到“平台凭证”配置 Token 或账号密码；同平台分组共用一套凭证。"
-                  />
-                );
-              }}
-            </Form.Item>
-          </FormSection>
-
           <Form.Item noStyle shouldUpdate={(prev, next) => prev.upstreamType !== next.upstreamType || prev.auth !== next.auth}>
             {({ getFieldValue }) => {
               const type = getFieldValue('upstreamType') as ChannelFormUpstreamType | undefined;
@@ -2622,7 +2766,7 @@ export default function DashboardPage() {
                     <Form.Item
                       name="upstreamUserId"
                       label="上游用户 ID"
-                      extra="NewAPI 用户 Access Token 或管理 Token 读取余额时需要；账号密码会登录后自动识别。"
+                      extra="Token 模式读取余额时需要；账号密码会登录后自动识别。"
                       rules={[{ required: true, message: '请输入上游用户 ID' }]}
                     >
                       <Input placeholder="例如 1" />
@@ -2632,17 +2776,10 @@ export default function DashboardPage() {
                   {(type === 'newapi' || type === 'sub2api') && auth === '用户登录' ? (
                     <PasswordVaultLoginFields
                       entries={passwordVaultEntries}
-                      provider={type}
-                      baseUrl={getFieldValue('upstreamBaseUrl')}
                       extra="仅用于识别和保存平台凭证，不在页面回显。"
                       saving={passwordVaultSaving}
                       onSelect={(entryId) => applyPasswordVaultEntry(entryId, 'channel')}
-                      onSave={() =>
-                        savePasswordVaultFromForm('channel', type, {
-                          baseUrl: getFieldValue('upstreamBaseUrl'),
-                          name: `${getFieldValue('upstreamName') || getFieldValue('name') || upstreamProviderLabel(type)}`
-                        })
-                      }
+                      onSave={() => savePasswordVaultFromForm('channel')}
                     />
                   ) : auth === '无鉴权' ? null : (
                     <Form.Item
@@ -2677,8 +2814,8 @@ export default function DashboardPage() {
           <Form.Item noStyle shouldUpdate={(prev, next) => prev.upstreamType !== next.upstreamType}>
             {({ getFieldValue }) =>
               getFieldValue('upstreamType') === 'cli_proxy' ? (
-                <FormSection title="号池管理" description="填写 CPA 管理密钥后，号池管理页可以读取账号成功/失败次数和限额用量。">
-                  <Form.Item name="credential" label="CPA 管理密钥" extra="留空表示不修改；保存到 MySQL，服务端加密存储，不在页面回显。">
+                <FormSection title="号池管理" description="填写管理密钥后，号池管理页可以读取账号成功/失败次数和限额用量。">
+                  <Form.Item name="credential" label="号池管理密钥" extra="留空表示不修改；保存到 MySQL，服务端加密存储，不在页面回显。">
                     <Input.Password placeholder="management key" autoComplete="new-password" />
                   </Form.Item>
                 </FormSection>
@@ -2711,7 +2848,7 @@ export default function DashboardPage() {
               name="enabled"
               label="启用状态"
               valuePropName="checked"
-              extra="关闭后会同步禁用主站渠道；CPA 号池只影响号池记录状态。"
+              extra="关闭后会同步禁用主站渠道；号池模式只影响号池记录状态。"
             >
               <Switch checkedChildren="使用中" unCheckedChildren="禁用" />
             </Form.Item>
@@ -2755,7 +2892,7 @@ export default function DashboardPage() {
               {({ getFieldValue }) =>
                 getFieldValue('upstreamType') === 'cli_proxy' ? (
                   <div className="form-note">
-                    <Text type="secondary">CPA 是号池模式，不读取余额和倍率；管理密钥单独加密保存。</Text>
+                    <Text type="secondary">号池模式不读取余额和倍率；管理密钥单独加密保存。</Text>
                   </div>
                 ) : null
               }
@@ -2829,7 +2966,7 @@ export default function DashboardPage() {
                     <Form.Item
                       name="upstreamUserId"
                       label="上游用户 ID"
-                      extra="NewAPI 用户 Access Token 或管理 Token 读取余额时需要；账号密码会登录后自动识别。"
+                      extra="Token 模式读取余额时需要；账号密码会登录后自动识别。"
                       rules={[{ required: true, message: '请输入上游用户 ID' }]}
                     >
                       <Input placeholder="例如 1" />
@@ -2855,18 +2992,11 @@ export default function DashboardPage() {
                     return (
                       <PasswordVaultLoginFields
                         entries={passwordVaultEntries}
-                        provider={type}
-                        baseUrl={editingCredentialGroup.primary.upstreamBaseUrl}
                         required={required}
                         extra={extra}
                         saving={passwordVaultSaving}
                         onSelect={(entryId) => applyPasswordVaultEntry(entryId, 'credential')}
-                        onSave={() =>
-                          savePasswordVaultFromForm('credential', type, {
-                            baseUrl: editingCredentialGroup.primary.upstreamBaseUrl,
-                            name: `${editingCredentialGroup.name}`
-                          })
-                        }
+                        onSave={() => savePasswordVaultFromForm('credential')}
                       />
                     );
                   }
@@ -2900,43 +3030,128 @@ export default function DashboardPage() {
         title="配置主站"
         open={relayModalOpen}
         className="relay-modal"
-        onCancel={() => setRelayModalOpen(false)}
-        onOk={saveRelay}
-        okText="保存"
+        width={640}
+        onCancel={() => {
+          setRelayModalOpen(false);
+          setRelayCredentialTestResult(null);
+          relayForm.resetFields();
+        }}
         cancelText="取消"
+        confirmLoading={savingRelay}
+        footer={[
+          <Button
+            key="cancel"
+            onClick={() => {
+              setRelayModalOpen(false);
+              setRelayCredentialTestResult(null);
+              relayForm.resetFields();
+            }}
+          >
+            取消
+          </Button>,
+          <Button key="test" icon={<CheckCircleOutlined />} loading={testingRelayCredential} onClick={testRelayCredential}>
+            测试凭证
+          </Button>,
+          <Button key="save" type="primary" loading={savingRelay} onClick={saveRelay}>
+            保存
+          </Button>
+        ]}
         destroyOnHidden
       >
-        <Form form={relayForm} layout="vertical" initialValues={{ auth: '管理 Token' }}>
+        <Form
+          form={relayForm}
+          layout="vertical"
+          initialValues={{ auth: '管理 Token' }}
+          onValuesChange={() => {
+            setRelayCredentialTestResult(null);
+          }}
+        >
           <Form.Item name="id" hidden>
             <Input />
           </Form.Item>
           <Form.Item name="name" label="主站名称" rules={[{ required: true, message: '请输入主站名称' }]}>
             <Input placeholder="例如 主站" />
           </Form.Item>
-          <Form.Item name="baseUrl" label="NewAPI 地址" rules={[{ required: true, message: '请输入 NewAPI 地址' }]}>
+          <Form.Item name="baseUrl" label="主站地址" rules={[{ required: true, message: '请输入主站地址' }]}>
             <Input placeholder="https://newapi.example.com" />
           </Form.Item>
-          <Form.Item name="auth" hidden>
-            <Input />
+          <Form.Item name="auth" label="认证方式" rules={[{ required: true, message: '请选择认证方式' }]}>
+            <Select
+              options={[
+                { label: '管理 Token', value: '管理 Token' },
+                { label: '账号密码', value: '账号密码' }
+              ]}
+            />
           </Form.Item>
-          <Text type="secondary">主站固定使用管理 Token，不需要选择认证类型。</Text>
-          <Form.Item
-            name="adminUserId"
-            label="管理员用户 ID"
-            extra="NewAPI 管理接口需要 New-Api-User header，一般是管理员账号的用户 ID。"
-            rules={[{ required: true, message: '请输入管理员用户 ID' }]}
-          >
-            <Input placeholder="例如 1" />
+          <Text type="secondary">
+            {relayAuthMode === '账号密码'
+              ? '账号密码模式不需要管理员用户 ID，系统会用登录态同步主站。'
+              : '管理 Token 模式需要管理员用户 ID。'}
+          </Text>
+          {relayAuthMode === '账号密码' ? (
+            <>
+              <Form.Item
+                name="adminAccount"
+                label="管理员账号 / 邮箱"
+                extra={relayLoginCredentialRequired ? undefined : '留空表示不修改已保存账号密码。'}
+                rules={[{ required: relayLoginCredentialRequired, message: '请输入管理员账号或邮箱' }]}
+              >
+                <Input autoComplete="username" placeholder="例如 admin@example.com" />
+              </Form.Item>
+              <Form.Item
+                name="adminPassword"
+                label="管理员密码"
+                rules={[{ required: relayLoginCredentialRequired, message: '请输入管理员密码' }]}
+              >
+                <Input.Password autoComplete="current-password" placeholder={relayLoginCredentialRequired ? '请输入管理员密码' : '留空表示不修改'} />
+              </Form.Item>
+            </>
+          ) : (
+            <>
+              <Form.Item
+                name="adminUserId"
+                label="管理员用户 ID"
+                extra="管理接口需要 New-Api-User header，一般是管理员账号的用户 ID。"
+                rules={[{ required: true, message: '请输入管理员用户 ID' }]}
+              >
+                <Input placeholder="例如 1" />
+              </Form.Item>
+              <Form.Item
+                name="adminToken"
+                label="管理 Token"
+                extra="保存后只记录已配置状态，不在页面回显 Token。"
+                rules={[{ required: relayTokenRequired, message: '请输入管理 Token' }]}
+              >
+                <Input.Password placeholder={relayTokenRequired ? 'sk-...' : '留空表示不修改'} autoComplete="new-password" />
+              </Form.Item>
+            </>
+          )}
+          <RelayCredentialTestPanel result={relayCredentialTestResult} />
+          <Text type="secondary">这里配置的是你自己的主站，不是渠道上游。</Text>
+        </Form>
+      </Modal>
+
+      <Modal
+        title="新增密码箱账号"
+        open={passwordVaultModalOpen}
+        onCancel={() => setPasswordVaultModalOpen(false)}
+        onOk={savePasswordVaultEntryFromModal}
+        okText="保存"
+        cancelText="取消"
+        confirmLoading={savingPasswordVaultEntry}
+        destroyOnHidden
+      >
+        <Form form={passwordVaultForm} layout="vertical">
+          <Form.Item name="name" label="名称" extra="可选，用来区分多个账号。">
+            <Input placeholder="例如 运营账号" />
           </Form.Item>
-          <Form.Item
-            name="adminToken"
-            label="管理 Token"
-            extra="保存后只记录已配置状态，不在页面回显 Token。"
-            rules={[{ required: !selectedRelay?.tokenConfigured, message: '请输入管理 Token' }]}
-          >
-            <Input.Password placeholder={selectedRelay?.tokenConfigured ? '留空表示不修改' : 'sk-...'} autoComplete="new-password" />
+          <Form.Item name="account" label="账号 / 邮箱" rules={[{ required: true, message: '请输入账号或邮箱' }]}>
+            <Input autoComplete="username" placeholder="例如 user@example.com" />
           </Form.Item>
-          <Text type="secondary">这里配置的是你自己的 NewAPI 主站，不是渠道上游。</Text>
+          <Form.Item name="password" label="密码" rules={[{ required: true, message: '请输入密码' }]}>
+            <Input.Password autoComplete="new-password" />
+          </Form.Item>
+          <Text type="secondary">保存后可在账号密码凭证里选择，不绑定渠道、主站分组或站点。</Text>
         </Form>
       </Modal>
         </>
@@ -3007,24 +3222,17 @@ function AuthScreen({
           <Avatar shape="square" size={42} icon={<ApiOutlined />} className="brand-avatar" />
           <div>
             <Text className="auth-side-kicker">RelayDesk Admin</Text>
-            <Title level={1}>NewAPI 中转管控台</Title>
-            <Paragraph>主站、渠道、凭证、自动巡检和告警集中在一个工作台里处理。</Paragraph>
-          </div>
-          <div className="auth-side-grid">
-            <span>Vben Layout</span>
-            <span>Shadcn Style</span>
-            <span>Dark Sidebar</span>
+            <Title level={1}>RelayDesk 管控台</Title>
+            <Paragraph>统一运维入口。</Paragraph>
           </div>
         </aside>
         <Card className="auth-card">
           <div className="auth-brand">
             <Avatar shape="square" size={40} icon={<LockOutlined />} className="brand-avatar" />
-          <div>
-            <Title level={3}>{setupRequired ? '设置登录密码' : '登录 RelayDesk'}</Title>
-            <Text type="secondary">
-              {setupRequired ? '密码只保存 PBKDF2 哈希，不保存明文。' : '登录后才能访问主站、渠道和凭证管理。'}
-            </Text>
-          </div>
+            <div>
+              <Title level={3}>{setupRequired ? '设置登录密码' : '登录 RelayDesk'}</Title>
+              <Text type="secondary">{setupRequired ? '密码只保存 PBKDF2 哈希，不保存明文。' : '账号密码登录。'}</Text>
+            </div>
           </div>
           {status?.error ? <Alert type="warning" showIcon title={status.error} /> : null}
           <Form
@@ -3209,25 +3417,6 @@ function OverviewView({
         />
       </Card>
 
-      <Card title="处理原则">
-        <Row gutter={[16, 16]}>
-          <Col xs={24} lg={8}>
-            <RunbookItem icon={<DatabaseOutlined />} title="先同步主站">
-              主站只负责导入渠道基础信息，渠道凭证统一在平台凭证里配置。
-            </RunbookItem>
-          </Col>
-          <Col xs={24} lg={8}>
-            <RunbookItem icon={<FieldTimeOutlined />} title="巡检看健康">
-              延迟、失败次数和系统禁用会在渠道列表里直接显示，不需要去倍率页判断。
-            </RunbookItem>
-          </Col>
-          <Col xs={24} lg={8}>
-            <RunbookItem icon={<AlertOutlined />} title="告警看异常">
-              倍率变化、余额低、延迟高和认证异常都走告警规则配置。
-            </RunbookItem>
-          </Col>
-        </Row>
-      </Card>
     </Flex>
   );
 }
@@ -3514,10 +3703,10 @@ function InspectionRulesPanel({
     },
     {
       key: 'cpaPreferred',
-      name: 'CPA 优先',
-      description: 'CPA 号池可用时是否提升主站渠道调度优先级。',
+      name: '号池优先',
+      description: '号池可用时是否提升主站渠道调度优先级。',
       condition: (
-        <RuleControl label="启用 CPA 优先">
+        <RuleControl label="启用号池优先">
           <Switch
             checked={inspection?.cpaPreferred ?? false}
             loading={inspectionBusy}
@@ -4001,8 +4190,6 @@ function RatesCard({
 
 function PasswordVaultLoginFields({
   entries,
-  provider,
-  baseUrl,
   extra,
   required = false,
   saving,
@@ -4010,34 +4197,26 @@ function PasswordVaultLoginFields({
   onSave
 }: {
   entries: PasswordVaultEntryView[];
-  provider: 'newapi' | 'sub2api';
-  baseUrl?: string | null;
   extra: string;
   required?: boolean;
   saving: boolean;
   onSelect: (entryId?: string) => void;
   onSave: () => void;
 }) {
-  const normalizedBaseUrl = normalizeVaultBaseUrl(baseUrl);
   const options = entries
-    .filter((entry) => entry.provider === provider)
     .slice()
-    .sort((left, right) => {
-      const leftMatch = normalizeVaultBaseUrl(left.baseUrl) === normalizedBaseUrl ? 0 : 1;
-      const rightMatch = normalizeVaultBaseUrl(right.baseUrl) === normalizedBaseUrl ? 0 : 1;
-      return leftMatch - rightMatch || left.name.localeCompare(right.name, 'zh-CN');
-    })
+    .sort((left, right) => left.name.localeCompare(right.name, 'zh-CN'))
     .map((entry) => ({
       value: entry.id,
-      label: `${entry.name} · ${entry.account}${entry.baseUrl ? ` · ${entry.baseUrl}` : ''}`
+      label: entry.name === entry.account ? entry.account : `${entry.name} · ${entry.account}`
     }));
 
   return (
     <Flex vertical gap={10} className="password-vault-login">
       <Form.Item
         name="passwordVaultId"
-        label="密码箱账号"
-        extra="选择后会自动填入账号和密码，密码不会在页面直接展示。"
+        label="从密码箱选择"
+        extra="选择后使用密码箱里保存的密码，页面不展示密码。"
       >
         <Select
           allowClear
@@ -4049,53 +4228,70 @@ function PasswordVaultLoginFields({
           notFoundContent="没有匹配的账号"
         />
       </Form.Item>
-      <Row gutter={12}>
-        <Col xs={24} md={12}>
-          <Form.Item
-            name="credentialAccount"
-            label="账号 / 邮箱"
-            extra={extra}
-            rules={required ? [{ required: true, message: '请输入账号或邮箱' }] : undefined}
-          >
-            <Input placeholder="例如 user@example.com" autoComplete="username" />
-          </Form.Item>
-        </Col>
-        <Col xs={24} md={12}>
-          <Form.Item
-            name="credentialPassword"
-            label="密码"
-            extra={extra}
-            rules={required ? [{ required: true, message: '请输入密码' }] : undefined}
-          >
-            <Input.Password placeholder="请输入密码" autoComplete="current-password" />
-          </Form.Item>
-        </Col>
-      </Row>
-      <Space size={8} wrap>
-        <Button htmlType="button" icon={<KeyOutlined />} loading={saving} onClick={onSave}>
-          保存到密码箱
-        </Button>
-      </Space>
+      <Form.Item noStyle shouldUpdate={(prev, next) => prev.passwordVaultId !== next.passwordVaultId || prev.credentialAccount !== next.credentialAccount}>
+        {({ getFieldValue }) => {
+          const selectedVaultId = getFieldValue('passwordVaultId');
+          const selectedAccount = String(getFieldValue('credentialAccount') ?? '').trim();
+
+          if (selectedVaultId) {
+            return (
+              <>
+                <Form.Item name="credentialAccount" hidden>
+                  <Input />
+                </Form.Item>
+                <Form.Item name="credentialPassword" hidden>
+                  <Input.Password />
+                </Form.Item>
+                <div className="password-vault-selected">
+                  <KeyOutlined />
+                  <div>
+                    <Text strong>{selectedAccount || '已选择密码箱账号'}</Text>
+                    <Text type="secondary">提交时使用密码箱加密密码，不在表单中展示。</Text>
+                  </div>
+                </div>
+              </>
+            );
+          }
+
+          return (
+            <>
+              <div className="password-vault-manual-grid">
+                <Form.Item
+                  name="credentialAccount"
+                  label="账号 / 邮箱"
+                  extra={extra}
+                  rules={required ? [{ required: true, message: '请输入账号或邮箱' }] : undefined}
+                >
+                  <Input placeholder="例如 user@example.com" autoComplete="username" />
+                </Form.Item>
+                <Form.Item
+                  name="credentialPassword"
+                  label="密码"
+                  extra={extra}
+                  rules={required ? [{ required: true, message: '请输入密码' }] : undefined}
+                >
+                  <Input.Password placeholder="请输入密码" autoComplete="current-password" />
+                </Form.Item>
+              </div>
+              <Space size={8} wrap className="password-vault-actions">
+                <Button htmlType="button" icon={<KeyOutlined />} loading={saving} onClick={onSave}>
+                  保存到密码箱
+                </Button>
+              </Space>
+            </>
+          );
+        }}
+      </Form.Item>
     </Flex>
   );
 }
 
 function CredentialsView({
   groups,
-  passwordVaultEntries,
-  passwordVaultLoading,
-  deletingPasswordVaultId,
-  onEditGroup,
-  onReloadPasswordVault,
-  onDeletePasswordVault
+  onEditGroup
 }: {
   groups: CredentialGroup[];
-  passwordVaultEntries: PasswordVaultEntryView[];
-  passwordVaultLoading: boolean;
-  deletingPasswordVaultId: string | null;
   onEditGroup: (group: CredentialGroup) => void;
-  onReloadPasswordVault: () => void;
-  onDeletePasswordVault: (id: string) => void;
 }) {
   const configuredCount = groups.reduce((total, group) => total + group.configuredCount, 0);
   const channelCount = groups.reduce((total, group) => total + group.channels.length, 0);
@@ -4167,74 +4363,61 @@ function CredentialsView({
   ];
 
   return (
-    <Flex vertical gap={14}>
-      <PasswordVaultCard
-        entries={passwordVaultEntries}
-        loading={passwordVaultLoading}
-        deletingId={deletingPasswordVaultId}
-        onReload={onReloadPasswordVault}
-        onDelete={onDeletePasswordVault}
+    <Card
+      title="平台分组凭证管理"
+      extra={
+        <Space size={8} wrap>
+          <Tag color="green">同平台分组共用</Tag>
+          <Text type="secondary">
+            服务端 {configuredCount}/{channelCount} 个渠道
+          </Text>
+        </Space>
+      }
+    >
+      <Table
+        rowKey="key"
+        columns={columns}
+        dataSource={groups}
+        pagination={{ pageSize: 8, showSizeChanger: false, hideOnSinglePage: true }}
+        size="middle"
+        scroll={{ x: 1050 }}
+        locale={{
+          emptyText: <Empty description="还没有可管理的平台分组凭证" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+        }}
       />
-      <Card
-        title="平台分组凭证管理"
-        extra={
-          <Space size={8} wrap>
-            <Tag color="green">同平台分组共用</Tag>
-            <Text type="secondary">
-              服务端 {configuredCount}/{channelCount} 个渠道
-            </Text>
-          </Space>
-        }
-      >
-        <Table
-          rowKey="key"
-          columns={columns}
-          dataSource={groups}
-          pagination={{ pageSize: 8, showSizeChanger: false, hideOnSinglePage: true }}
-          size="middle"
-          scroll={{ x: 1050 }}
-          locale={{
-            emptyText: <Empty description="还没有可管理的平台分组凭证" image={Empty.PRESENTED_IMAGE_SIMPLE} />
-          }}
-        />
-      </Card>
-    </Flex>
+    </Card>
   );
 }
 
 function PasswordVaultCard({
   entries,
   loading,
+  saving,
   deletingId,
+  onAdd,
   onReload,
   onDelete
 }: {
   entries: PasswordVaultEntryView[];
   loading: boolean;
+  saving: boolean;
   deletingId: string | null;
+  onAdd: () => void;
   onReload: () => void;
   onDelete: (id: string) => void;
 }) {
   const columns: ColumnsType<PasswordVaultEntryView> = [
     {
-      title: '账号',
-      key: 'account',
-      width: 260,
-      render: (_, record) => (
-        <Flex vertical gap={4} className="cell-main">
-          <Space size={8} wrap>
-            <Text strong>{record.name}</Text>
-            <ProviderTag type={record.provider} />
-          </Space>
-          <Text type="secondary" className="truncate-text">{record.account}</Text>
-        </Flex>
-      )
+      title: '名称',
+      dataIndex: 'name',
+      width: 220,
+      render: (value) => <Text strong>{value || '-'}</Text>
     },
     {
-      title: '站点',
-      dataIndex: 'baseUrl',
-      width: 260,
-      render: (value) => <Text type="secondary" className="truncate-text">{value || '未绑定站点'}</Text>
+      title: '账号',
+      key: 'account',
+      width: 280,
+      render: (_, record) => <Text className="truncate-text">{record.account}</Text>
     },
     {
       title: '最近使用',
@@ -4269,10 +4452,15 @@ function PasswordVaultCard({
       title={
         <div className="table-card-title">
           <Text strong>密码箱</Text>
-          <Text type="secondary">账号密码登录时可选择这里的账号；密码只在选择时解密填入。</Text>
+          <Text type="secondary">独立保存账号密码；在账号密码凭证里选择时才解密填入。</Text>
         </div>
       }
-      extra={<Button icon={<ReloadOutlined />} loading={loading} onClick={onReload}>刷新</Button>}
+      extra={
+        <Space size={8} wrap>
+          <Button icon={<ReloadOutlined />} loading={loading} onClick={onReload}>刷新</Button>
+          <Button type="primary" icon={<PlusOutlined />} loading={saving} onClick={onAdd}>新增账号</Button>
+        </Space>
+      }
     >
       <Table
         rowKey="id"
@@ -4280,8 +4468,8 @@ function PasswordVaultCard({
         dataSource={entries}
         pagination={{ pageSize: 5, showSizeChanger: false, hideOnSinglePage: true }}
         size="middle"
-        scroll={{ x: 780 }}
-        locale={{ emptyText: <Empty description="还没有保存账号，在账号密码模式里点击“保存到密码箱”" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
+        scroll={{ x: 640 }}
+        locale={{ emptyText: <Empty description="还没有保存账号，点击新增账号后可在凭证里选择" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
       />
     </Card>
   );
@@ -4373,7 +4561,7 @@ function CpaPoolPanel({
       className="cpa-pool-card"
       title={
         <div className="table-card-title">
-          <Text strong>CPA 号池</Text>
+          <Text strong>号池</Text>
           <Text type="secondary">账号状态、调用结果和限额用量</Text>
         </div>
       }
@@ -4382,7 +4570,7 @@ function CpaPoolPanel({
           <Select
             className="cpa-channel-select"
             value={selectedChannelId ?? data.channel?.id}
-            placeholder="选择 CPA 渠道"
+            placeholder="选择号池渠道"
             options={channelOptions}
             onChange={onSelectChannel}
           />
@@ -4424,7 +4612,7 @@ function CpaPoolPanel({
           }}
           size="middle"
           scroll={{ x: 1060 }}
-          locale={{ emptyText: <Empty description="没有读取到号池账号，先给 CPA 渠道配置管理密钥" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
+          locale={{ emptyText: <Empty description="没有读取到号池账号，先给号池渠道配置管理密钥" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
         />
       </Flex>
     </Card>
@@ -4809,6 +4997,23 @@ function CredentialTestPanel({ result }: { result: CredentialTestResult | null }
   );
 }
 
+function RelayCredentialTestPanel({ result }: { result: CredentialTestResult | null }) {
+  if (!result) {
+    return null;
+  }
+
+  const tone: StatusTone = result.status === 'ok' ? 'ok' : result.status === 'error' ? 'error' : 'warn';
+
+  return (
+    <div className="credential-test-panel relay-credential-test-panel">
+      <div className="credential-test-head">
+        <StatusTag tone={tone}>{result.status === 'ok' ? '测试通过' : result.status === 'error' ? '测试失败' : '部分可用'}</StatusTag>
+        <Text type="secondary">{result.message}</Text>
+      </div>
+    </div>
+  );
+}
+
 function CredentialBalancePanel({ result }: { result: CredentialTestResult | null }) {
   if (!result) {
     return null;
@@ -4924,12 +5129,12 @@ function UpstreamGroupsPanel({
 }
 
 function AuthHint({ type, auth, prefix, suffix }: { type?: ChannelFormUpstreamType; auth?: string; prefix?: string; suffix?: string }) {
-  let text = '先输入上游地址识别类型；识别不出来时手动选择 NewAPI、Sub2API 或 CPA 号池。';
+  let text = '先输入上游地址识别类型；识别不出来时手动选择 NewAPI、Sub2API 或号池。';
 
   if (type === 'newapi') {
     text = auth === '用户登录'
       ? 'NewAPI 账号密码会调用登录接口，并自动使用登录用户读取余额和倍率；遇到 Cloudflare/验证码时可改用用户 Access Token 或管理 Token。'
-      : 'NewAPI 用户 Access Token 或管理 Token 需要上游用户 ID 才能读取余额和倍率；API Key 通常只能做受限监控。';
+      : 'NewAPI Token 模式需要上游用户 ID 才能读取余额和倍率；API Key 通常只能做受限监控。';
   }
 
   if (type === 'sub2api') {
@@ -4943,7 +5148,7 @@ function AuthHint({ type, auth, prefix, suffix }: { type?: ChannelFormUpstreamTy
   }
 
   if (type === 'cli_proxy') {
-    text = 'CPA 是号池模式，不读取余额和倍率；渠道和管理密钥会写入 MySQL，号池管理页读取账号用量。';
+    text = '号池模式不读取余额和倍率；渠道和管理密钥会写入 MySQL，号池管理页读取账号用量。';
   }
 
   return (
@@ -4958,20 +5163,6 @@ function CredentialAuthHint() {
     <div className="auth-hint">
       <Text type="secondary">这里只保存平台凭证并做余额读取校验；渠道 Key、上游配置、优先级和权重不在这里修改。</Text>
     </div>
-  );
-}
-
-function RunbookItem({ icon, title, children }: { icon: ReactNode; title: string; children: ReactNode }) {
-  return (
-    <Space align="start">
-      <Avatar shape="square" size={32} icon={icon} className="runbook-avatar" />
-      <div>
-        <Text strong>{title}</Text>
-        <Paragraph type="secondary" className="runbook-copy">
-          {children}
-        </Paragraph>
-      </div>
-    </Space>
   );
 }
 
@@ -5004,7 +5195,7 @@ function ProviderTag({ type }: { type: UpstreamProvider }) {
   const config = {
     newapi: { color: 'green', label: 'NewAPI' },
     sub2api: { color: 'blue', label: 'Sub2API' },
-    cli_proxy: { color: 'default', label: 'CPA 号池' }
+    cli_proxy: { color: 'default', label: '号池' }
   }[type];
 
   return <Tag color={config.color}>{config.label}</Tag>;
@@ -5309,28 +5500,6 @@ function buildMainStationGroupOptions(
   }));
 }
 
-function buildMainStationGroupFilterOptions(
-  channels: ChannelView[],
-  mainStationGroups: MainStationGroupInfo[]
-) {
-  const values = new Set<string>();
-
-  for (const group of mainStationGroups) {
-    addGroupCandidates(values, group.name);
-  }
-  for (const channel of channels) {
-    addGroupCandidates(values, mainStationGroupLabel(channel));
-  }
-
-  return [
-    { label: '全部主站分组', value: MAIN_STATION_GROUP_ALL },
-    ...[...values].filter(Boolean).sort(compareText).map((value) => ({
-      label: value === '-' ? '未分组' : value,
-      value
-    }))
-  ];
-}
-
 function mergeMainStationGroupState(current: MainStationGroupInfo[], group: MainStationGroupInfo) {
   const next = new Map(current.map((item) => [item.name.trim().toLowerCase(), item]));
   next.set(group.name.trim().toLowerCase(), group);
@@ -5585,7 +5754,7 @@ function buildRateRows(channels: ChannelView[], relays: RelayView[]): RateRow[] 
 
     return {
       key: channel.id,
-      relayName: relay?.name ?? 'NewAPI 主站',
+      relayName: relay?.name ?? '主站',
       channelName: channel.name,
       upstreamName: channel.upstreamName,
       upstreamType: channel.upstreamType,
@@ -5804,7 +5973,7 @@ function upstreamProviderLabel(type: UpstreamProvider) {
     return 'Sub2API';
   }
 
-  return 'CPA（号池）';
+  return '号池';
 }
 
 function authOptions(type?: ChannelFormUpstreamType): Array<{ label: string; value: string }> {
@@ -6018,7 +6187,7 @@ function balanceHint(channel: ChannelView) {
     }
 
     return channel.upstreamType === 'newapi'
-      ? 'NewAPI 的 sk-模型调用 Key 通常不能读取账号余额；请改用账号密码，或改用用户 Access Token 并填写上游用户 ID。'
+      ? '模型调用 Key 通常不能读取账号余额；请改用账号密码，或改用用户 Access Token 并填写上游用户 ID。'
       : 'API Key 只能转发调用，不能读取账号余额。';
   }
 
@@ -6029,7 +6198,7 @@ function balanceHint(channel: ChannelView) {
   if (channel.status === '余额不可见' || channel.status === '余额未获取') {
     return channel.upstreamType === 'newapi'
       ? '已读到倍率，但 /api/user/self 没返回余额。账号密码模式不需要用户 ID；Token 模式请确认上游用户 ID。'
-      : '已读到倍率，但 /api/v1/auth/me 没返回余额。请确认填写的是 Sub2API 用户 Token 或账号密码。';
+      : '已读到倍率，但用户信息接口没返回余额。请确认填写的是用户 Token 或账号密码。';
   }
 
   return channel.rateSource || channel.status;
@@ -6050,11 +6219,6 @@ function normalizedExternalUrl(value: string) {
   }
 }
 
-function normalizeVaultBaseUrl(value: unknown) {
-  const text = String(value ?? '').trim();
-  return text ? text.replace(/\/+$/, '').toLowerCase() : null;
-}
-
 function credentialMode(channel: ChannelView): CredentialMode {
   if (channel.credentialConfigured) {
     return 'server';
@@ -6069,6 +6233,7 @@ function viewTitle(view: View) {
     channels: '渠道管理',
     rates: '倍率快照',
     credentials: '平台凭证',
+    passwordVault: '密码箱',
     inspection: '自动巡检',
     cpaPool: '号池管理',
     alerts: '告警事件'
@@ -6081,8 +6246,9 @@ function viewDescription(view: View) {
     channels: '新增上游渠道，凭证在平台凭证里统一配置。',
     rates: '查看按渠道保存的倍率快照和变化。',
     credentials: '按平台分组管理 Token 或账号/密码凭证，同组渠道共用一套。',
+    passwordVault: '独立保存账号密码，在凭证选择时填入。',
     inspection: '配置主站渠道延迟测试、优先级策略和巡检规则。',
-    cpaPool: '查看 CPA 号池账号成功、失败和近期开销。',
+    cpaPool: '查看号池账号成功、失败和近期开销。',
     alerts: '查看同步失败、倍率变化和受限监控事件。'
   }[view];
 }

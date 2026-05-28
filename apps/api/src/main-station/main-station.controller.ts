@@ -19,9 +19,27 @@ export class MainStationController {
       auth?: string;
       adminUserId?: string;
       adminToken?: string;
+      adminAccount?: string;
+      adminPassword?: string;
     }
   ) {
     return this.mainStation.update(body);
+  }
+
+  @Post('test')
+  test(
+    @Body()
+    body: {
+      name?: string;
+      baseUrl?: string;
+      auth?: string;
+      adminUserId?: string;
+      adminToken?: string;
+      adminAccount?: string;
+      adminPassword?: string;
+    }
+  ) {
+    return this.mainStation.test(body);
   }
 
   @Post('sync-channels')

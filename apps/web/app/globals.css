@@ -4009,14 +4009,51 @@ body,
 }
 
 .password-vault-login {
-  padding: 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.password-vault-login .ant-form-item:last-child {
+  margin-bottom: 0;
+}
+
+.password-vault-manual-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  align-items: start;
+}
+
+.password-vault-selected {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
   border: 1px solid var(--rd-border);
   border-radius: 8px;
   background: var(--rd-surface-muted);
 }
 
-.password-vault-login .ant-form-item:last-child {
-  margin-bottom: 0;
+.password-vault-selected > .anticon {
+  margin-top: 3px;
+  color: var(--rd-primary);
+}
+
+.password-vault-selected > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.password-vault-actions {
+  margin-top: -4px;
+}
+
+@media (max-width: 760px) {
+  .password-vault-manual-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 @media (max-width: 760px) {
@@ -4396,4 +4433,62 @@ body,
     grid-template-columns: minmax(0, 1fr);
     gap: 4px;
   }
+}
+
+/* Control size normalization. Keep dense header icon actions compact. */
+:where(.app-shell, .ant-modal) {
+  --rd-control-height: 36px;
+  --rd-control-radius: 7px;
+}
+
+:where(.app-shell, .ant-modal) .ant-btn:not(.ant-btn-sm):not(.ant-btn-lg):not(.ant-btn-link):not(.header-icon-action):not(.header-secondary-action):not(.header-sync-action):not(.header-collapse) {
+  height: var(--rd-control-height);
+  min-height: var(--rd-control-height);
+  padding-inline: 14px;
+  border-radius: var(--rd-control-radius);
+  line-height: 1;
+}
+
+:where(.app-shell, .ant-modal) :is(.ant-input, .ant-input-affix-wrapper, .ant-input-number, .ant-picker),
+:where(.app-shell, .ant-modal) .ant-select-single:not(.ant-select-sm):not(.ant-select-lg) .ant-select-selector {
+  height: var(--rd-control-height) !important;
+  min-height: var(--rd-control-height);
+  border-radius: var(--rd-control-radius) !important;
+  box-sizing: border-box;
+}
+
+:where(.app-shell, .ant-modal) .ant-input {
+  line-height: 22px;
+}
+
+:where(.app-shell, .ant-modal) .ant-input-affix-wrapper .ant-input {
+  height: auto !important;
+  min-height: 0;
+  padding: 0;
+  border: 0 !important;
+  line-height: 22px;
+  box-shadow: none !important;
+}
+
+:where(.app-shell, .ant-modal) .ant-input-number .ant-input-number-input {
+  height: 34px;
+  line-height: 34px;
+}
+
+:where(.app-shell, .ant-modal) .ant-select-single:not(.ant-select-sm):not(.ant-select-lg) :is(.ant-select-selection-item, .ant-select-selection-placeholder) {
+  line-height: 34px;
+}
+
+:where(.app-shell, .ant-modal) .ant-select-single:not(.ant-select-sm):not(.ant-select-lg) .ant-select-selection-search-input {
+  height: 34px !important;
+}
+
+:where(.app-shell, .ant-modal) .ant-space-compact .ant-btn:not(.ant-btn-sm):not(.ant-btn-lg),
+:where(.app-shell, .ant-modal) .ant-space-compact :is(.ant-input, .ant-input-affix-wrapper, .ant-input-number),
+:where(.app-shell, .ant-modal) .ant-space-compact .ant-select-single:not(.ant-select-sm):not(.ant-select-lg) .ant-select-selector {
+  height: var(--rd-control-height) !important;
+}
+
+.ant-modal .ant-modal-footer .ant-btn:not(.ant-btn-sm):not(.ant-btn-lg) {
+  min-width: 92px;
 }

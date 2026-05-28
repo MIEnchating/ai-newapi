@@ -603,15 +603,13 @@ export class UpstreamsService {
     }
 
     const baseUrl = normalizeVaultBaseUrl(input.baseUrl);
-    const existing = id
-      ? await this.passwordVaultRow(id)
-      : await this.passwordVaultRowByIdentity(provider, baseUrl, account).catch(() => null);
+    const existing = id ? await this.passwordVaultRow(id) : null;
     const password = input.password?.trim();
     if (!password && !existing) {
       throw new BadRequestException('请输入密码');
     }
 
-    const entryId = id ?? existing?.id ?? `vault-${randomUUID()}`;
+    const entryId = id ?? `vault-${randomUUID()}`;
     const name = input.name?.trim() || existing?.name || account;
     const encryptedPayload = password
       ? encryptCredentialPayload({ email: account, username: account, password })
@@ -846,8 +844,8 @@ export class UpstreamsService {
       where: { id: 'relay-newapi-main' }
     });
 
-    if (!station || !station.baseUrl || !station.adminUserId || !station.encryptedAdminToken) {
-      throw new BadRequestException('主站未配置：请先保存 NewAPI 地址、管理员用户 ID 和管理 Token');
+    if (!station || !station.baseUrl || !station.encryptedAdminToken) {
+      throw new BadRequestException('主站未配置：请先保存 NewAPI 地址和认证信息');
     }
 
     const key = input.key?.trim();
@@ -855,8 +853,8 @@ export class UpstreamsService {
       throw new BadRequestException('请输入主站调用 Key，用于在主站创建渠道');
     }
 
-    const adminToken = decryptAdminToken(station.encryptedAdminToken);
-    const created = await postNewApiChannel(station.baseUrl, station.adminUserId, adminToken, {
+    const authContext = await mainStationAuthContext(station);
+    const created = await postNewApiChannel(station.baseUrl, authContext, {
       name: input.name,
       type: input.channelType ?? 1,
       key,
@@ -960,19 +958,6 @@ export class UpstreamsService {
     return row;
   }
 
-  private async passwordVaultRowByIdentity(provider: string, baseUrl: string | null, account: string) {
-    const rows = await this.prisma.$queryRaw<PasswordVaultRow[]>`
-      SELECT id, name, provider, baseUrl, account, encryptedPayload, lastUsedAt, createdAt, updatedAt
-      FROM PasswordVaultEntry
-      WHERE provider = ${provider.toUpperCase()}
-        AND account = ${account}
-        AND ((baseUrl IS NULL AND ${baseUrl} IS NULL) OR baseUrl = ${baseUrl})
-      LIMIT 1
-    `;
-
-    return rows[0] ?? null;
-  }
-
   private async updateMainStationChannelIfNeeded(
     existing: {
       id: string;
@@ -1001,12 +986,12 @@ export class UpstreamsService {
       where: { id: 'relay-newapi-main' }
     });
 
-    if (!station || !station.baseUrl || !station.adminUserId || !station.encryptedAdminToken) {
+    if (!station || !station.baseUrl || !station.encryptedAdminToken) {
       throw new BadRequestException('主站未配置：无法把渠道配置写回主站');
     }
 
     try {
-      await putNewApiChannel(station.baseUrl, station.adminUserId, decryptAdminToken(station.encryptedAdminToken), channelId, patch);
+      await putNewApiChannel(station.baseUrl, await mainStationAuthContext(station), channelId, patch);
     } catch (error) {
       throw new BadRequestException(`主站渠道更新失败：${errorMessage(error)}`);
     }
@@ -1118,25 +1103,32 @@ function mainStationChannelIdFromUpstreamId(id: string) {
   return /^channel-newapi-(.+)$/.exec(id)?.[1] ?? null;
 }
 
-function decryptAdminToken(encryptedAdminToken: string) {
-  const payload = decryptCredentialPayload(encryptedAdminToken);
-  const adminToken = payload.adminToken?.trim();
-
-  if (!adminToken) {
-    throw new BadRequestException('admin token is invalid');
+async function mainStationAuthContext(station: { baseUrl: string; adminUserId: string | null; encryptedAdminToken: string | null }) {
+  if (!station.encryptedAdminToken) {
+    throw new BadRequestException('主站认证信息未配置');
   }
 
-  return adminToken;
+  const payload = decryptCredentialPayload(station.encryptedAdminToken);
+  const adminToken = payload.adminToken?.trim();
+
+  if (adminToken) {
+    const headers = new Headers();
+    if (station.adminUserId?.trim()) {
+      headers.set('New-Api-User', station.adminUserId.trim());
+    }
+
+    return { token: adminToken, headers } satisfies RequestInit & { token?: string };
+  }
+
+  return newApiPasswordAuthContext(station.baseUrl, payload);
 }
 
 async function putNewApiChannel(
   baseUrl: string,
-  adminUserId: string,
-  adminToken: string,
+  authContext: RequestInit & { token?: string },
   channelId: string,
   input: MainStationChannelPatch
 ) {
-  const headers = new Headers({ 'New-Api-User': adminUserId });
   const body: Record<string, unknown> = {
     id: /^\d+$/.test(channelId) ? Number(channelId) : channelId
   };
@@ -1165,17 +1157,15 @@ async function putNewApiChannel(
   }
 
   await requestJson<unknown>(baseUrl, '/api/channel/', {
+    ...authContext,
     method: 'PUT',
-    token: adminToken,
-    headers,
     body: JSON.stringify(body)
   });
 }
 
 async function postNewApiChannel(
   baseUrl: string,
-  adminUserId: string,
-  adminToken: string,
+  authContext: RequestInit & { token?: string },
   input: {
     name: string;
     type: number;
@@ -1188,11 +1178,9 @@ async function postNewApiChannel(
     enabled: boolean;
   }
 ) {
-  const headers = new Headers({ 'New-Api-User': adminUserId });
   const payload = await requestJson<unknown>(baseUrl, '/api/channel/', {
+    ...authContext,
     method: 'POST',
-    token: adminToken,
-    headers,
     body: JSON.stringify({
       mode: 'single',
       channel: {
@@ -1209,16 +1197,14 @@ async function postNewApiChannel(
       }
     })
   });
-  const id = channelIdFromPayload(payload) ?? await findNewApiChannelId(baseUrl, adminUserId, adminToken, input.name);
+  const id = channelIdFromPayload(payload) ?? await findNewApiChannelId(baseUrl, authContext, input.name);
 
   return { id };
 }
 
-async function findNewApiChannelId(baseUrl: string, adminUserId: string, adminToken: string, name: string) {
-  const headers = new Headers({ 'New-Api-User': adminUserId });
+async function findNewApiChannelId(baseUrl: string, authContext: RequestInit & { token?: string }, name: string) {
   const payload = await requestJson<unknown>(baseUrl, '/api/channel/?p=0&page_size=1000', {
-    token: adminToken,
-    headers
+    ...authContext
   });
   const records = channelRecordsFromPayload(payload);
   const matched = records.find((record) => stringValue(record.name)?.trim() === name);

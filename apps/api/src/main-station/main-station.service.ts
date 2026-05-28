@@ -11,6 +11,8 @@ type MainStationInput = {
   auth?: string;
   adminUserId?: string;
   adminToken?: string;
+  adminAccount?: string;
+  adminPassword?: string;
 };
 
 type MainStationGroupInput = {
@@ -22,6 +24,13 @@ type MainStationGroupInfo = {
   name: string;
   ratio: number | null;
   source: string;
+};
+
+type MainStationTestResult = {
+  ok: boolean;
+  status: 'ok' | 'limited' | 'error';
+  message: string;
+  rateSource?: string;
 };
 
 type ImportedChannel = {
@@ -36,6 +45,14 @@ type ImportedChannel = {
   status: UpstreamStatus;
   priority: number;
   weight: number;
+};
+
+type NewApiAuthContext = RequestInit & { token?: string };
+
+type MainStationCredential = {
+  adminUserId: string;
+  encryptedAdminToken: string;
+  authContext?: NewApiAuthContext;
 };
 
 @Injectable()
@@ -62,21 +79,13 @@ export class MainStationService {
         });
         const name = trimOrDefault(input.name, '主站');
         const baseUrl = trimOrNull(input.baseUrl);
-        const auth = trimOrDefault(input.auth, '管理 Token');
-        const adminUserId = trimOrNull(input.adminUserId);
-        const adminToken = trimOrNull(input.adminToken);
+        const auth = normalizeMainStationAuth(input.auth);
 
-        if (!name || !baseUrl || !auth || !adminUserId) {
-          throw new BadRequestException('name, baseUrl, auth and adminUserId are required');
+        if (!name || !baseUrl || !auth) {
+          throw new BadRequestException('name, baseUrl and auth are required');
         }
 
-        const encryptedAdminToken = adminToken
-          ? encryptCredentialPayload({ adminToken })
-          : existing?.encryptedAdminToken ?? null;
-
-        if (!encryptedAdminToken) {
-          throw new BadRequestException('admin token is required');
-        }
+        const credential = await buildMainStationCredential(input, existing, baseUrl, auth);
 
         const station = await this.prisma.mainStation.upsert({
           where: { id: MAIN_STATION_ID },
@@ -85,15 +94,15 @@ export class MainStationService {
             name,
             baseUrl,
             auth,
-            adminUserId,
-            encryptedAdminToken
+            adminUserId: credential.adminUserId,
+            encryptedAdminToken: credential.encryptedAdminToken
           },
           update: {
             name,
             baseUrl,
             auth,
-            adminUserId,
-            encryptedAdminToken,
+            adminUserId: credential.adminUserId,
+            encryptedAdminToken: credential.encryptedAdminToken,
             lastError: null
           }
         });
@@ -109,18 +118,54 @@ export class MainStationService {
     }
   }
 
+  async test(input: MainStationInput): Promise<MainStationTestResult> {
+    await this.ensureSchema();
+    const existing = await this.prisma.mainStation.findUnique({
+      where: { id: MAIN_STATION_ID }
+    });
+    const baseUrl = trimOrNull(input.baseUrl) ?? existing?.baseUrl ?? null;
+    const auth = normalizeMainStationAuth(input.auth ?? existing?.auth);
+
+    if (!baseUrl || !auth) {
+      throw new BadRequestException('baseUrl and auth are required');
+    }
+
+    const credential = await buildMainStationCredential(input, existing, baseUrl, auth);
+    const authContext = credential.authContext ?? await mainStationAuthContext({
+      baseUrl,
+      adminUserId: credential.adminUserId,
+      encryptedAdminToken: credential.encryptedAdminToken
+    });
+    const imported = await fetchNewApiChannels(baseUrl, authContext);
+
+    if (!imported.ok) {
+      return {
+        ok: false,
+        status: 'error',
+        message: imported.message
+      };
+    }
+
+    return {
+      ok: true,
+      status: 'ok',
+      message: `凭证可用，已读取 ${imported.channels.length} 个主站渠道`,
+      rateSource: '/api/channel/'
+    };
+  }
+
   async syncChannels() {
     await this.ensureSchema();
     const station = await this.prisma.mainStation.findUnique({
       where: { id: MAIN_STATION_ID }
     });
 
-    if (!station || !station.baseUrl || !station.adminUserId || !station.encryptedAdminToken) {
-      throw new BadRequestException('主站未配置：请先保存 NewAPI 地址、管理员用户 ID 和管理 Token');
+    if (!station || !station.baseUrl || !station.encryptedAdminToken) {
+      throw new BadRequestException('主站未配置：请先保存 NewAPI 地址和认证信息');
     }
 
-    const adminToken = decryptAdminToken(station.encryptedAdminToken);
-    const imported = await fetchNewApiChannels(station.baseUrl, station.adminUserId, adminToken);
+    const authContext = await mainStationAuthContext(station);
+    const imported = await fetchNewApiChannels(station.baseUrl, authContext);
 
     if (!imported.ok) {
       await this.prisma.mainStation.update({
@@ -234,10 +279,10 @@ export class MainStationService {
   async listGroups() {
     await this.ensureSchema();
     const station = await this.requireConfiguredStation();
-    const adminToken = decryptAdminToken(station.encryptedAdminToken as string);
+    const authContext = await mainStationAuthContext(station);
     const [groupsResult, optionsResult] = await Promise.allSettled([
-      requestNewApiJson<unknown>(station.baseUrl, '/api/group/', station.adminUserId, adminToken),
-      requestNewApiJson<unknown>(station.baseUrl, '/api/option/', station.adminUserId, adminToken)
+      requestNewApiJson<unknown>(station.baseUrl, '/api/group/', authContext),
+      requestNewApiJson<unknown>(station.baseUrl, '/api/option/', authContext)
     ]);
     const ratios = parseMainStationGroupRatio(settledValue(optionsResult));
     const records = groupRecordsFromPayload(unwrapData(settledValue(groupsResult)));
@@ -266,13 +311,13 @@ export class MainStationService {
     }
 
     const station = await this.requireConfiguredStation();
-    const adminToken = decryptAdminToken(station.encryptedAdminToken as string);
-    const optionsPayload = await requestNewApiJson<unknown>(station.baseUrl, '/api/option/', station.adminUserId, adminToken)
+    const authContext = await mainStationAuthContext(station);
+    const optionsPayload = await requestNewApiJson<unknown>(station.baseUrl, '/api/option/', authContext)
       .catch((error) => {
-        throw new BadRequestException(`读取主站分组配置失败：${errorMessage(error)}。请确认主站管理 Token 拥有 Root 权限`);
+        throw new BadRequestException(`读取主站分组配置失败：${errorMessage(error)}。请确认主站认证账号拥有 Root 权限`);
       });
     const ratios = parseMainStationGroupRatio(optionsPayload);
-    const groupsPayload = await requestNewApiJson<unknown>(station.baseUrl, '/api/group/', station.adminUserId, adminToken).catch(() => undefined);
+    const groupsPayload = await requestNewApiJson<unknown>(station.baseUrl, '/api/group/', authContext).catch(() => undefined);
     for (const record of groupRecordsFromPayload(unwrapData(groupsPayload))) {
       setRatioIfMissing(ratios, groupNameFromRecord(record), 1);
     }
@@ -282,14 +327,14 @@ export class MainStationService {
 
     ratios[groupName] = existingName ? ratios[existingName] : ratio;
 
-    await requestNewApiJson<unknown>(station.baseUrl, '/api/option/', station.adminUserId, adminToken, {
+    await requestNewApiJson<unknown>(station.baseUrl, '/api/option/', authContext, {
       method: 'PUT',
       body: JSON.stringify({
         key: 'GroupRatio',
         value: JSON.stringify(sortRatioMap(ratios))
       })
     }).catch((error) => {
-      throw new BadRequestException(`创建主站分组失败：${errorMessage(error)}。请确认主站管理 Token 拥有 Root 权限`);
+      throw new BadRequestException(`创建主站分组失败：${errorMessage(error)}。请确认主站认证账号拥有 Root 权限`);
     });
 
     const groups = mergeMainStationGroups([], ratios);
@@ -308,8 +353,8 @@ export class MainStationService {
       where: { id: MAIN_STATION_ID }
     });
 
-    if (!station || !station.baseUrl || !station.adminUserId || !station.encryptedAdminToken) {
-      throw new BadRequestException('主站未配置：请先保存 NewAPI 地址、管理员用户 ID 和管理 Token');
+    if (!station || !station.baseUrl || !station.encryptedAdminToken) {
+      throw new BadRequestException('主站未配置：请先保存 NewAPI 地址和认证信息');
     }
 
     return station;
@@ -359,29 +404,140 @@ function toPublicStation(station: MainStation | null) {
   };
 }
 
-function decryptAdminToken(encryptedAdminToken: string) {
-  const payload = decryptCredentialPayload(encryptedAdminToken);
-  const adminToken = payload.adminToken?.trim();
-
-  if (!adminToken) {
-    throw new BadRequestException('admin token is invalid');
-  }
-
-  return adminToken;
+function normalizeMainStationAuth(value: string | undefined) {
+  const auth = value?.trim();
+  return auth === '账号密码' || auth === '用户登录' ? '账号密码' : '管理 Token';
 }
 
-async function fetchNewApiChannels(baseUrl: string, adminUserId: string, token: string) {
+async function buildMainStationCredential(
+  input: MainStationInput,
+  existing: MainStation | null,
+  baseUrl: string,
+  auth: string
+): Promise<MainStationCredential> {
+  if (auth === '账号密码') {
+    const account = trimOrNull(input.adminAccount);
+    const password = trimOrNull(input.adminPassword);
+
+    if (account && password) {
+      const login = await loginNewApiAccount(baseUrl, account, password);
+
+      return {
+        adminUserId: login.userId ?? existing?.adminUserId ?? '',
+        encryptedAdminToken: encryptCredentialPayload({ email: account, username: account, password }),
+        authContext: { headers: login.headers }
+      };
+    }
+
+    if (existing?.auth === '账号密码' && existing.encryptedAdminToken) {
+      return {
+        adminUserId: existing.adminUserId ?? '',
+        encryptedAdminToken: existing.encryptedAdminToken
+      };
+    }
+
+    throw new BadRequestException(!account ? 'adminAccount is required' : 'adminPassword is required');
+  }
+
+  const adminUserId = trimOrNull(input.adminUserId) ?? existing?.adminUserId ?? null;
+  const adminToken = trimOrNull(input.adminToken);
+
+  if (!adminUserId) {
+    throw new BadRequestException('adminUserId is required');
+  }
+
+  if (adminToken) {
+    return {
+      adminUserId,
+      encryptedAdminToken: encryptCredentialPayload({ adminToken })
+    };
+  }
+
+  if (existing?.auth === '管理 Token' && existing.encryptedAdminToken) {
+    return {
+      adminUserId,
+      encryptedAdminToken: existing.encryptedAdminToken
+    };
+  }
+
+  throw new BadRequestException('admin token is required');
+}
+
+type MainStationAuthSource = Pick<MainStation, 'baseUrl' | 'adminUserId' | 'encryptedAdminToken'>;
+
+async function mainStationAuthContext(station: MainStationAuthSource): Promise<NewApiAuthContext> {
+  if (!station.encryptedAdminToken) {
+    throw new BadRequestException('main station credential is invalid');
+  }
+
+  const payload = decryptCredentialPayload(station.encryptedAdminToken);
+  const adminToken = payload.adminToken?.trim();
+
+  if (adminToken) {
+    const headers = new Headers();
+    if (station.adminUserId?.trim()) {
+      headers.set('New-Api-User', station.adminUserId.trim());
+    }
+
+    return { token: adminToken, headers };
+  }
+
+  const account = payload.email?.trim() ?? payload.username?.trim();
+  const password = payload.password?.trim();
+
+  if (!account || !password) {
+    throw new BadRequestException('main station credential is invalid');
+  }
+
+  const login = await loginNewApiAccount(station.baseUrl, account, password);
+  return { headers: login.headers };
+}
+
+async function loginNewApiAccount(baseUrl: string, account: string, password: string) {
+  const login = await requestNewApiRaw<unknown>(baseUrl, '/api/user/login', {
+    method: 'POST',
+    body: JSON.stringify({ username: account, password })
+  }).catch((error) => {
+    throw new BadRequestException(`主站账号登录失败：${errorMessage(error)}`);
+  });
+  const data = recordValue(unwrapData(login.payload)) ?? {};
+
+  if (data.require_2fa === true) {
+    throw new BadRequestException('NewAPI 账号启用了 2FA，暂不能使用账号密码自动鉴权');
+  }
+
+  const cookie = cookieHeader(login.headers);
+  if (!cookie) {
+    throw new BadRequestException('NewAPI 登录成功但没有返回 session cookie');
+  }
+
+  const headers = new Headers({ cookie });
+  const userId =
+    stringValue(data.id) ??
+    stringValue(data.user_id) ??
+    stringValue(data.userId) ??
+    stringValue(recordValue(data.user)?.id);
+
+  if (userId) {
+    headers.set('New-Api-User', userId);
+  }
+
+  return { headers, userId };
+}
+
+async function fetchNewApiChannels(baseUrl: string, authContext: NewApiAuthContext) {
   const url = `${normalizeBaseUrl(baseUrl)}/api/channel/?p=0&page_size=1000`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 12000);
+  const headers = new Headers(authContext.headers);
+  headers.set('accept', 'application/json');
+  if (authContext.token) {
+    headers.set('authorization', `Bearer ${stripBearer(authContext.token)}`);
+  }
 
   try {
     const response = await fetch(url, {
-      headers: {
-        accept: 'application/json',
-        authorization: `Bearer ${token}`,
-        'new-api-user': adminUserId
-      },
+      headers,
       signal: controller.signal
     });
     const text = await response.text();
@@ -421,17 +577,25 @@ async function fetchNewApiChannels(baseUrl: string, adminUserId: string, token: 
 async function requestNewApiJson<T>(
   baseUrl: string,
   path: string,
-  adminUserId: string,
-  token: string,
+  authContext: NewApiAuthContext,
   options: RequestInit = {}
 ): Promise<T> {
+  return (await requestNewApiRaw<T>(baseUrl, path, { ...options, ...authContext })).payload;
+}
+
+async function requestNewApiRaw<T>(
+  baseUrl: string,
+  path: string,
+  options: NewApiAuthContext = {}
+): Promise<{ payload: T; headers: Headers }> {
   const url = `${normalizeBaseUrl(baseUrl)}${path.startsWith('/') ? path : `/${path}`}`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 12_000);
   const headers = new Headers(options.headers);
   headers.set('accept', 'application/json');
-  headers.set('authorization', `Bearer ${stripBearer(token)}`);
-  headers.set('new-api-user', adminUserId);
+  if (options.token) {
+    headers.set('authorization', `Bearer ${stripBearer(options.token)}`);
+  }
 
   if (options.body && !headers.has('content-type')) {
     headers.set('content-type', 'application/json');
@@ -463,7 +627,7 @@ async function requestNewApiJson<T>(
       throw new Error(stringValue(record?.message) ?? stringValue(record?.reason) ?? `NewAPI 主站返回 code ${code}`);
     }
 
-    return payload as T;
+    return { payload: payload as T, headers: response.headers };
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
       throw new Error('请求超时');
@@ -473,6 +637,21 @@ async function requestNewApiJson<T>(
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function cookieHeader(headers: Headers) {
+  const getSetCookie = (headers as Headers & { getSetCookie?: () => string[] }).getSetCookie;
+  const setCookieValues = typeof getSetCookie === 'function'
+    ? getSetCookie.call(headers)
+    : [];
+  const fallback = headers.get('set-cookie');
+  const rawValues = setCookieValues.length > 0 ? setCookieValues : fallback ? [fallback] : [];
+  const cookies = rawValues
+    .flatMap((value) => value.split(/,(?=\s*[^;,]+=)/))
+    .map((value) => value.split(';')[0]?.trim())
+    .filter((value): value is string => Boolean(value));
+
+  return cookies.join('; ');
 }
 
 function parseMainStationGroupRatio(payload: unknown) {

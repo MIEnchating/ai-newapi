@@ -35,6 +35,8 @@ export async function PATCH(request: Request) {
     auth?: string;
     adminUserId?: string;
     adminToken?: string;
+    adminAccount?: string;
+    adminPassword?: string;
   };
   const store = getStore();
   const channelCount = store.channels.length;
@@ -46,7 +48,9 @@ export async function PATCH(request: Request) {
         baseUrl: body.baseUrl,
         auth: body.auth,
         adminUserId: body.adminUserId,
-        adminToken: body.adminToken
+        adminToken: body.adminToken,
+        adminAccount: body.adminAccount,
+        adminPassword: body.adminPassword
       },
       channelCount
     );
@@ -55,7 +59,7 @@ export async function PATCH(request: Request) {
 
     const event: EventRecord = {
       title: `配置主站 ${updatedRelay.name}`,
-      detail: `${updatedRelay.baseUrl} / 用户 ${updatedRelay.adminUserId} / ${updatedRelay.auth} ${updatedRelay.tokenConfigured ? '已配置' : '未配置'}`,
+      detail: `${updatedRelay.baseUrl}${updatedRelay.adminUserId ? ` / 用户 ${updatedRelay.adminUserId}` : ''} / ${updatedRelay.auth} ${updatedRelay.tokenConfigured ? '已配置' : '未配置'}`,
       time: currentTime(),
       status: 'success'
     };
